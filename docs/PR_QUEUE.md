@@ -105,3 +105,13 @@ Hourly autonomous PR triage. Merges small safe diffs, holds large/protocol/secur
 **Releases cut**: none this tick. Earlier in the hour: swf-node v0.12.1, SROS v0.1.33 — both visual/health-event fixes.
 
 **Next tick should**: if user merges #98 themselves or closes #93/#94 to free a slot, the loop can pick up #98. The change is small, isolated to boot path, and serves a confirmed user pain point (the splash blocking).
+
+## 2026-05-19 17:49 EDT
+
+**Open PRs**: 5 across both repos (sros: 5 — #93, #94, #98, #99, #100; swf-node: 0)
+
+**This tick**: queue back over the >3 threshold — holding all. Two new PRs landed this hour: #99 (calendar keyboard shortcut hint bar) and #100 (calendar now-line at current time). Both look like small targeted UX wins, both from dmarzzz, both probably mergeable once the queue drains.
+
+**Releases cut**: none
+
+**Next tick should**: prioritize calendar PRs #99 + #100 once #93/#94 clear — they're the kind of small, isolated UX polish that moves the day-1 cohort score upward. #98 (warm boot) also still waiting.
