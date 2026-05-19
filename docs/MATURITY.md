@@ -118,3 +118,7 @@ This entry is the explicit drift escalation flagged by the 08:25 tick. No furthe
 ## 2026-05-19 17:25 EDT
 
 7/10, held. 3 open PRs (sros #93/#94/#98). #98 "skip splash on warm boot" is high-leverage but trapped behind oldest-first in the PR-triage loop. Recommend user fast-merges it.
+
+## 2026-05-19 18:25 EDT
+
+7/10, held. Queue back up to 5 (#93/#94/#98/#99/#100). Three of the new arrivals (#98/#99/#100) are exactly the small UX-polish PRs that would each nudge the score; all stuck behind #93 (broken-flagged) + #94 (size-flagged).
