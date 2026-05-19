@@ -80,7 +80,11 @@ export function getSyncState() { return _syncState; }
 // no GH-commit-ts API calls block boot. The background refresh that
 // fires right after will replace the snapshot when it lands and
 // notify subscribers so views repaint with fresh data.
-const SURFACE_LS_KEY = "srfg:cohort_surface_v1";
+// Bumped to v2 in v0.1.35: the v1 snapshot doesn't carry a `calendar`
+// field, so users who hydrated under v0.1.31..v0.1.34 would render an
+// empty calendar tab on first paint after the upgrade. The v2 key forces
+// a fresh fetch which now includes the calendar bundle.
+const SURFACE_LS_KEY = "srfg:cohort_surface_v2";
 // Surface snapshots can grow to ~200KB (50 people × ~3KB each plus other
 // kinds). localStorage is bounded at ~5MB per origin so this fits, but
 // we still guard against quota errors on write — a write failure just
@@ -108,6 +112,7 @@ function _writeSurfaceLs(surface) {
       events: surface.events || [],
       asks: surface.asks || [],
       cohort_vocab: surface.cohort_vocab || {},
+      calendar: surface.calendar || null,
     };
     localStorage.setItem(SURFACE_LS_KEY, JSON.stringify(payload));
   } catch {
@@ -116,7 +121,7 @@ function _writeSurfaceLs(surface) {
 }
 
 function emptyShape() {
-  return { teams: [], people: [], clusters: [], program: [], events: [], asks: [], cohort_vocab: {} };
+  return { teams: [], people: [], clusters: [], program: [], events: [], asks: [], cohort_vocab: {}, calendar: null };
 }
 
 function normalize(data) {
@@ -128,6 +133,13 @@ function normalize(data) {
     events:       Array.isArray(data?.events)   ? data.events   : [],
     asks:         Array.isArray(data?.asks)     ? data.asks     : [],
     cohort_vocab: (data?.cohort_vocab && typeof data.cohort_vocab === "object") ? data.cohort_vocab : {},
+    // Pre-baked calendar bundle from the GH `cohort-data/program/calendar.json`
+    // path or the fixture's `calendar` field. The renderer's `loadCalendar()`
+    // tries the live Phala URL first and falls back to this. Previously this
+    // field was dropped here, so on every fresh boot the calendar tab
+    // rendered against `data=null` until the Phala fetch resolved (and went
+    // blank entirely if that fetch failed or was slow). Pass it through.
+    calendar:     (data?.calendar && typeof data.calendar === "object") ? data.calendar : null,
   };
 }
 
@@ -201,6 +213,22 @@ async function loadFromGithub() {
   });
 
   out.cohort_vocab = schema.cohort_vocab || {};
+
+  // Calendar bundle — the renderer's loadCalendar() tries the live Phala
+  // URL first; this is the fallback when that's unreachable, and what we
+  // render against on the very first paint before the live fetch resolves.
+  // Best-effort: a missing/malformed file just leaves out.calendar = null
+  // so the calendar tab falls back to the live URL only.
+  try {
+    const calRaw = await fetchRaw("cohort-data/calendar.json");
+    const calJson = JSON.parse(calRaw);
+    if (calJson && typeof calJson === "object" && calJson.tabs) {
+      out.calendar = calJson;
+    }
+  } catch (e) {
+    console.warn("[cohort-source] calendar.json fetch/parse failed:", e?.message || e);
+  }
+
   const normalized = normalize(out);
   // Attach the sha map. Not part of the schema-shaped surface so callers
   // that iterate `normalized` lists stay unaffected.
