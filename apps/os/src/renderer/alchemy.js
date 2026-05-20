@@ -1063,15 +1063,15 @@ const CAL_LEFT_W     = 240;       // left column — person labels
 const CAL_PAD_R      = 40;
 const CAL_PAD_B      = 40;
 const CAL_FOOTER_H   = 64;        // bottom — date span + legend
-const CAL_BG         = "#0b0a08";
-const CAL_BG_LANE    = "#15120e";
+const CAL_BG         = "#231F20";
+const CAL_BG_LANE    = "#2C2728";
 const CAL_RULE       = "rgba(245, 243, 238, 0.07)";
 const CAL_RULE_WEEK  = "rgba(245, 243, 238, 0.14)";
 const CAL_INK_1      = "#f5f3ee";
 const CAL_INK_2      = "#b8b4ab";
 const CAL_INK_3      = "#7a7368";
 const CAL_INK_4      = "#3a3833";
-const CAL_OXIDE      = "#c44025";  // today marker
+const CAL_OXIDE      = "#8F220E";  // today marker
 
 // Reasonable defaults for the program; if cohort data exposes a
 // programStart/end later this lifts straight from there.
@@ -1765,7 +1765,7 @@ function triggerConfetti(originEl) {
 
   // Cohort palette — keep the celebration on-brand with the rest of the
   // app rather than rainbow Mardi Gras.
-  const colors = ["#c44025", "#c1a872", "#e8b94c", "#7eb499", "#f5f3ee"];
+  const colors = ["#8F220E", "#c1a872", "#e8b94c", "#7eb499", "#f5f3ee"];
 
   const container = document.createElement("div");
   container.className = "confetti-burst";
@@ -2586,8 +2586,8 @@ function renderAtlas() {
 
   const nodeSvg = laid.map(n => {
     const dim = active ? (n.tag === active ? 1 : 0.32) : 1;
-    const fill = n.tag === active ? "#c44025" : "rgba(193,168,114,0.55)";
-    const stroke = n.tag === active ? "#c44025" : "rgba(245,243,238,0.55)";
+    const fill = n.tag === active ? "#8F220E" : "rgba(193,168,114,0.55)";
+    const stroke = n.tag === active ? "#8F220E" : "rgba(245,243,238,0.55)";
     const label = n.tag.length > 16 ? n.tag.slice(0, 15) + "…" : n.tag;
     return `
       <g class="alch-atlas-node" data-atlas-tag="${escAttr(n.tag)}" opacity="${dim}" style="cursor:pointer;">

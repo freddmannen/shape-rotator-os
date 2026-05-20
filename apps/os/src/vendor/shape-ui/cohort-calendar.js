@@ -24,21 +24,21 @@ const CAL_LEFT_W     = 240;       // left column — person labels
 const CAL_PAD_R      = 40;
 const CAL_PAD_B      = 40;
 const CAL_FOOTER_H   = 64;        // bottom — date span + legend
-const CAL_BG         = "#0b0a08";
+const CAL_BG         = "#231F20";
 // Lane background: lifted a notch (was #15120e) so the present/absent
 // delta has somewhere to land. Bars on a near-black field read as one
 // solid mass; on a slightly-warm field they pop.
-const CAL_BG_LANE    = "#1f1c17";
+const CAL_BG_LANE    = "#2C2728";
 // Absence base: pulled darker than the lane so stripes ride on a solid
 // hole, not on the same value as everywhere else.
-const CAL_ABS_BASE   = "#0e0c0a";
+const CAL_ABS_BASE   = "#1A1719";
 const CAL_RULE       = "rgba(245, 243, 238, 0.07)";
 const CAL_RULE_WEEK  = "rgba(245, 243, 238, 0.14)";
 const CAL_INK_1      = "#f5f3ee";
 const CAL_INK_2      = "#b8b4ab";
 const CAL_INK_3      = "#7a7368";
 const CAL_INK_4      = "#3a3833";
-const CAL_OXIDE      = "#c44025";  // today marker
+const CAL_OXIDE      = "#8F220E";  // today marker (xyz sr-red)
 
 // Reasonable defaults for the program; the wrapper API accepts an
 // override range, and the surface data may eventually carry its own
