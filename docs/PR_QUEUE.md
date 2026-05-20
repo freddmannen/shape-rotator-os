@@ -141,3 +141,14 @@ Hourly autonomous PR triage. Merges small safe diffs, holds large/protocol/secur
 **Releases cut**: none. Calendar polish stacks on the integration branch; main not affected. swf-node v0.12.2 shipped earlier this hour (kind_pulled fix).
 
 **Next tick should**: still waiting for the integration branch → main PR.
+
+## 2026-05-19 21:49 EDT
+
+**Open PRs**: 1 across both repos (sros: 1 — #105; swf-node: 0)
+
+**This tick**:
+- sros #105 (dmarzzz, +58/-16 across 4 files, "complete prefers-reduced-motion coverage across all transitions") — MERGED into `review/calendar-ux-stack`. a11y polish.
+
+**Releases cut**: none this tick.
+
+**Next tick should**: the calendar-ux-stack is accumulating polish (#103/#104/#105). Watch for the stack → main PR.
