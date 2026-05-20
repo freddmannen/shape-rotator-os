@@ -86,16 +86,47 @@
   color: var(--alchemy-oxide-bright, #B43A19);
 }
 
-/* ── subtabs (week / presence) ───────────────────────────────────────── */
+/* ── week view container ─────────────────────────────────────────────── */
+.cal-week { padding: 0 var(--cal-page-px) 48px; max-width: 1480px; margin: 0 auto; }
+.cal-presence { padding: 0 var(--cal-page-px) 48px; max-width: 1480px; margin: 0 auto; }
+
+/* ── masthead — tabs + scrubber + dateline, one composed block ──────── */
+/* Previously these were three orphaned rows separated by big gaps. The
+ * masthead wraps them in a single block bounded by hairlines so the top
+ * of the page reads as one editorial heading, not as three siblings of
+ * accidentally similar size. Two-row composition:
+ *   row 1 (.cal-masthead-rail)  tabs left  · 10-dot week rail right
+ *   row 2 (.cal-dateline)       meta + nav · big ordinal · date range */
+.cal-masthead {
+  margin: 16px 0 22px;
+  border-top: 1px solid var(--ed-rule-2);
+  border-bottom: 1px solid var(--ed-rule-2);
+}
+.cal-masthead[data-phase="m1"],
+.cal-masthead[data-phase="m3"] {
+  border-top-color: rgba(180, 58, 25, 0.50);
+}
+.cal-masthead-rail {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  gap: 32px;
+  padding: 12px 0 14px;
+  border-bottom: 1px solid var(--ed-rule);
+}
+
+/* ── subtabs (week / presence) — now living inside the rail ──────────── */
 .cal-subtabs {
   display: flex; gap: 22px;
-  padding: 16px var(--cal-page-px) 0;
-  border-bottom: 1px solid var(--ed-rule);
-  margin-bottom: 24px;
+  flex: 0 0 auto;
+  /* Reset legacy styles.css overrides (the Electron app ships an older
+   * standalone-band .cal-subtabs rule with margin + border-bottom). The
+   * rail provides its own bottom hairline and outer spacing now. */
+  margin: 0;
+  border-bottom: 0;
+  padding: 0;
 }
 .cal-subtab {
   appearance: none; background: transparent; border: 0;
-  padding: 10px 0 14px;
+  padding: 6px 0 8px;
   display: flex; align-items: baseline; gap: 10px;
   cursor: pointer;
   color: var(--ed-ink-1); opacity: 0.55;
@@ -108,47 +139,54 @@
   border-bottom-color: var(--alchemy-oxide-bright, #B43A19);
 }
 .cal-subtab .cs-label {
-  font-family: var(--ed-display); font-size: 22px; font-style: italic;
+  font-family: var(--ed-display); font-size: 24px; font-style: italic;
   letter-spacing: -0.015em;
+  line-height: 1;
 }
 .cal-subtab .cs-hint {
   font-family: var(--ed-mono); font-size: 9.5px; letter-spacing: 0.20em;
   text-transform: lowercase; color: var(--ed-ink-1); opacity: 0.35;
+  line-height: 1;
 }
-
-/* ── week view container ─────────────────────────────────────────────── */
-.cal-week { padding: 0 var(--cal-page-px) 48px; max-width: 1480px; margin: 0 auto; }
-.cal-presence { padding: 0 var(--cal-page-px) 48px; max-width: 1480px; margin: 0 auto; }
 .cal-presence-empty {
   font-family: var(--ed-mono); font-size: 11px;
   color: var(--ed-ink-3); padding: 28px 0;
 }
 
-/* ── 10-week scrubber ────────────────────────────────────────────────── */
+/* ── 10-week scrubber — compact step rail in the masthead's right slot ─ */
+/* Was a full-width grid that read as "a thin line" because nothing else
+ * shared its row. Now it sits inline next to the tabs, sized to its own
+ * content, with the phase labels (m1 · 1–4 etc.) stacked underneath in
+ * the same column block — so the dots and what they MEAN are spatially
+ * tied to each other. */
 .cal-scrub {
   position: relative;
   display: grid;
-  grid-template-columns: repeat(10, 1fr);
+  grid-template-rows: auto auto;
+  grid-template-columns: repeat(10, 22px);
+  column-gap: 4px;
+  row-gap: 8px;
   align-items: center;
-  padding: 18px 0 30px;
-  margin: 0 0 24px;
+  flex: 0 0 auto;
 }
 .cal-scrub-track {
-  position: absolute;
-  left: 11px; right: 11px; top: 30px;
+  grid-row: 1; grid-column: 1 / -1;
   height: 1px;
   background: var(--ed-rule);
+  align-self: center;
+  margin: 0 11px;
   z-index: 0;
 }
 .cal-scrub-dot {
   appearance: none; background: var(--ed-bg-0); border: 1px solid var(--ed-rule-3);
   width: 22px; height: 22px;
   border-radius: 999px;
-  padding: 0; margin: 0 auto;
+  padding: 0; margin: 0;
   font-family: var(--ed-mono); font-size: 9.5px;
   color: var(--ed-ink-1); opacity: 0.55;
   cursor: pointer; position: relative; z-index: 1;
   display: grid; place-items: center;
+  grid-row: 1;
   transition: opacity 160ms ease-out, border-color 160ms ease-out, background 160ms ease-out;
 }
 .cal-scrub-dot:hover { opacity: 1; border-color: var(--ed-ink-1); }
@@ -167,69 +205,94 @@
   color: var(--ed-ink-1);
 }
 .cal-scrub-phases {
-  position: absolute;
-  left: 0; right: 0; bottom: 0;
-  display: flex; justify-content: space-between;
+  grid-row: 2; grid-column: 1 / -1;
+  display: grid;
+  /* m1 spans dots 1–4, m2 spans 5–9, m3 is dot 10 — match the
+   * underlying scrubber so the labels actually correspond to columns. */
+  grid-template-columns: repeat(4, 22px) repeat(5, 22px) 22px;
+  column-gap: 4px;
   font-family: var(--ed-mono); font-size: 9px;
-  letter-spacing: 0.20em; text-transform: lowercase;
-  color: var(--ed-ink-1); opacity: 0.4;
+  letter-spacing: 0.14em; text-transform: lowercase;
+  color: var(--ed-ink-1); opacity: 0.55;
   pointer-events: none;
+  line-height: 1;
 }
-.cal-scrub-phases .csp.m1 { color: var(--alchemy-oxide-bright, #B43A19); opacity: 0.55; }
-.cal-scrub-phases .csp.m2 { color: var(--ed-ink-2); }
-.cal-scrub-phases .csp.m3 { color: var(--alchemy-oxide-bright, #B43A19); opacity: 0.55; }
+.cal-scrub-phases .csp {
+  white-space: nowrap;
+  border-top: 1px solid var(--ed-rule);
+  padding-top: 6px;
+}
+.cal-scrub-phases .csp.m1 { grid-column: 1 / span 4; color: var(--alchemy-oxide-bright, #B43A19); opacity: 0.7; border-top-color: rgba(180,58,25,0.35); }
+.cal-scrub-phases .csp.m2 { grid-column: 5 / span 5; color: var(--ed-ink-2); }
+.cal-scrub-phases .csp.m3 { grid-column: 10 / span 1; color: var(--alchemy-oxide-bright, #B43A19); opacity: 0.7; border-top-color: rgba(180,58,25,0.35); text-align: right; }
 
-/* ── dateline ────────────────────────────────────────────────────────── */
+/* ── dateline — bottom half of the masthead ─────────────────────────── */
+/* Two-row grid:
+ *   row 1: meta (left)          ·   nav (right)
+ *   row 2: ordinal display (left) ·  date range (right, baseline-aligned)
+ * Display + range share a baseline so the masthead resolves into a single
+ * line of "main argument" instead of three orphaned text blocks. */
 .cal-dateline {
-  position: relative;
-  border-top: 1px solid var(--ed-rule-3);
-  padding: 22px 0 18px;
-  margin: 0 0 22px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  column-gap: 24px;
+  row-gap: 10px;
+  padding: 14px 0 18px;
 }
-.cal-dateline[data-phase="m1"],
-.cal-dateline[data-phase="m3"] { border-top-color: rgba(180, 58, 25, 0.55); }
-.cal-dateline-row {
+.cal-dateline-meta {
   display: flex; align-items: baseline; gap: 10px;
   font-family: var(--ed-mono); font-size: 10px;
-  letter-spacing: 0.20em; text-transform: lowercase;
+  letter-spacing: 0.18em; text-transform: lowercase;
   color: var(--ed-ink-1); opacity: 0.55;
-  margin: 0 0 10px;
-  padding-right: 200px;   /* leave room for absolute-positioned nav */
+  grid-column: 1; grid-row: 1;
+  min-width: 0;       /* allow theme text to truncate cleanly */
+}
+.cal-dateline-meta .cal-dateline-theme {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: 0 1 auto;
 }
 .cal-dateline-tag {
   color: var(--alchemy-oxide-bright, #B43A19);
   opacity: 1; font-weight: 400;
+  white-space: nowrap;
 }
 .cal-dateline-tag[data-phase="m2"] { color: var(--ed-ink-1); opacity: 0.55; }
 .cal-dateline-sep { color: var(--ed-ink-4); }
 .cal-dateline-theme { color: var(--ed-ink-2); opacity: 0.85; }
 .cal-dateline-display {
+  grid-column: 1; grid-row: 2;
   font-family: var(--ed-display);
   font-size: 52px;
   line-height: 0.96;
   letter-spacing: -0.025em;
   color: var(--ed-ink-1);
-  margin: 0 0 6px;
+  margin: 0;
 }
 .cal-dateline-display em {
   font-style: italic;
   font-feature-settings: "liga", "dlig", "swsh";
 }
 .cal-dateline-range {
-  font-family: var(--ed-mono); font-size: 11px;
+  grid-column: 2; grid-row: 2;
+  font-family: var(--ed-mono); font-size: 12px;
   letter-spacing: 0.18em; text-transform: lowercase;
   color: var(--ed-ink-2); opacity: 0.85;
+  white-space: nowrap;
+  justify-self: end; align-self: end;
+  padding-bottom: 6px;
 }
 .cal-dateline-nav {
-  position: absolute; right: 0; top: 22px;
+  grid-column: 2; grid-row: 1;
   display: flex; gap: 0;
   border: 1px solid var(--ed-rule-2);
   border-radius: 999px;
   overflow: hidden;
+  justify-self: end;
 }
 .cal-dateline-nav .cdn-btn {
   appearance: none; background: transparent; border: 0;
-  padding: 7px 14px;
+  padding: 6px 14px;
   font-family: var(--ed-mono); font-size: 10px;
   letter-spacing: 0.18em; text-transform: lowercase;
   color: var(--ed-ink-1); opacity: 0.55;
@@ -245,6 +308,13 @@
 .cal-dateline-nav .cdn-today { color: var(--alchemy-oxide-bright, #B43A19); }
 
 /* ── 7-day grid ──────────────────────────────────────────────────────── */
+/* Today's column gets ~1.6× the width of a peer day so it has room to
+ * fully render event titles without truncation. The widening is keyed by
+ * data-today-col (0…6); each .cal-day :nth-child applies the wider
+ * fraction when it matches. The siblings keep `minmax(0, 1fr)` so
+ * everything else divides the remaining track evenly.
+ * If today isn't in the visible week, no data-today-col is set and the
+ * grid stays at the symmetric repeat(7, 1fr). */
 .cal-grid {
   display: grid;
   grid-template-columns: repeat(7, minmax(0, 1fr));
@@ -252,6 +322,13 @@
   background: var(--ed-rule-2);
   border: 1px solid var(--ed-rule-2);
 }
+.cal-grid[data-today-col="0"] { grid-template-columns: minmax(0, 1.6fr) repeat(6, minmax(0, 1fr)); }
+.cal-grid[data-today-col="1"] { grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr) repeat(5, minmax(0, 1fr)); }
+.cal-grid[data-today-col="2"] { grid-template-columns: repeat(2, minmax(0, 1fr)) minmax(0, 1.6fr) repeat(4, minmax(0, 1fr)); }
+.cal-grid[data-today-col="3"] { grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(0, 1.6fr) repeat(3, minmax(0, 1fr)); }
+.cal-grid[data-today-col="4"] { grid-template-columns: repeat(4, minmax(0, 1fr)) minmax(0, 1.6fr) repeat(2, minmax(0, 1fr)); }
+.cal-grid[data-today-col="5"] { grid-template-columns: repeat(5, minmax(0, 1fr)) minmax(0, 1.6fr) minmax(0, 1fr); }
+.cal-grid[data-today-col="6"] { grid-template-columns: repeat(6, minmax(0, 1fr)) minmax(0, 1.6fr); }
 
 .cal-day {
   background: var(--ed-bg-1);
@@ -260,6 +337,15 @@
   display: flex; flex-direction: column; gap: 8px;
   position: relative;
   border-top: 1px solid transparent;
+  min-width: 0;          /* let the day card shrink in its grid track so
+                            inner two-column event rows wrap rather than
+                            overflow */
+}
+/* Empty days don't deserve a full 220px min-height — collapses the
+ * vertical budget into a compact placeholder so the days that DO have
+ * content can use the saved real estate. */
+.cal-day.is-empty {
+  min-height: 96px;
 }
 
 /* Today: warm wash + brighter top hairline + a leftward warm bar so the
@@ -384,8 +470,24 @@
   opacity: 0.55; font-size: 9.5px; line-height: 1.4;
 }
 
-/* events from the live cell */
+/* events from the live cell — two-column time/title row */
+/* The previous layout stacked an italic title BELOW the time, in narrow
+ * day columns this clipped titles after two characters ("o…", "te…").
+ * The new layout puts a tight tabular time column on the left and lets
+ * the title use the entire remaining card width, wrapping to two lines
+ * cleanly. The title sits on the same baseline as the time so the row
+ * reads as a calendar entry, not as two separate spans. */
 .cal-event {
+  /* Explicit reset: the Electron app's styles.css ships an older
+   * 200px-grid event-card rule for .cal-event that loads BEFORE this
+   * stylesheet. Neutralize the cross-rule properties so the broadsheet
+   * day-cell events render as a vertical flow of rows, not as the
+   * legacy three-column event card. */
+  display: block;
+  grid-template-columns: none;
+  padding: 0;
+  background: transparent;
+  border-left: 0;
   font-family: var(--ed-mono);
   font-size: 10.5px;
   line-height: 1.5;
@@ -398,24 +500,61 @@
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
 }
+.cal-event-row {
+  display: grid;
+  grid-template-columns: minmax(48px, max-content) minmax(0, 1fr);
+  column-gap: 8px;
+  align-items: baseline;
+  margin: 0 0 3px;
+}
+.cev-time {
+  font-family: var(--ed-mono);
+  font-size: 10px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  color: var(--ed-ink-1);
+  white-space: nowrap;
+  /* time sits a touch above the italic baseline so the two columns
+   * line up optically rather than mathematically */
+  position: relative; top: -1px;
+}
+.cev-time--empty {
+  /* preserve the grid column so titles align across stacked events even
+   * when one of them has no leading time, but render nothing */
+  width: 0; min-width: 0; padding: 0;
+}
 .cal-event-title {
   display: block;
   color: var(--ed-ink-1);
   font-family: var(--ed-display);
   font-style: italic;
-  font-size: 12.5px;
-  line-height: 1.25;
+  font-size: 14px;
+  line-height: 1.2;
   letter-spacing: -0.01em;
-  margin: 0 0 3px;
   text-transform: lowercase;
+  /* allow up to two lines, then taper with an ellipsis. -webkit-line-clamp
+   * has broad enough support inside Chromium/WebKit-only contexts
+   * (Electron + Safari + Chrome) — and our day cards are too short to
+   * benefit from showing more anyway. */
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  /* Hard-wrap on long single tokens (URLs, hashtags) so the title never
+   * pushes its grid track wider than the day card. */
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+  hyphens: auto;
 }
 .cal-event-extra {
   color: var(--ed-ink-2);
   opacity: 0.8;
-  margin: 2px 0;
+  margin: 2px 0 2px 56px;   /* indent to align under title column */
+  font-size: 10px;
 }
 .cal-event .cal-bullets {
-  list-style: none; padding: 0; margin: 4px 0 0;
+  list-style: none; padding: 0; margin: 4px 0 0 56px;   /* align under title column */
 }
 .cal-event .cal-bullets > li {
   padding-left: 12px; position: relative;
@@ -531,10 +670,20 @@
 @media (max-width: 1100px) {
   :root { --cal-page-px: 28px; }
   .cal-dateline-display { font-size: 40px; }
-  .cal-grid { grid-template-columns: repeat(2, 1fr); }
+  /* Rail wraps to two rows when the tabs + scrubber can't fit side-by-side.
+   * Tabs stay on row 1 left-aligned, scrubber wraps to row 2 and uses the
+   * full rail width so its dots aren't squeezed. */
+  .cal-masthead-rail { flex-wrap: wrap; row-gap: 16px; }
+  .cal-scrub { width: 100%; grid-template-columns: repeat(10, minmax(0, 1fr)); }
+  .cal-scrub-dot { justify-self: center; }
+  .cal-scrub-phases { grid-template-columns: repeat(4, 1fr) repeat(5, 1fr) 1fr; }
+  /* Grid collapses to 2 columns; today-col widening is dropped at this
+   * width because the asymmetric trick assumes 7 sibling tracks. */
+  .cal-grid,
+  .cal-grid[data-today-col] {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
   .cal-day { min-height: 160px; }
-  .cal-dateline-nav { position: static; margin-top: 14px; }
-  .cal-dateline-row { padding-right: 0; }
 }
 @media (max-width: 760px) {
   :root { --cal-page-px: 18px; }
@@ -543,23 +692,37 @@
   .cal-page-title-row { gap: 6px; }
   .cal-page-sync { font-size: 9.5px; }
 
-  /* Sub-tab row sits tight under the page head on mobile. */
-  .cal-subtabs { padding-top: 10px; margin-bottom: 14px; gap: 18px; }
+  /* Masthead collapses: tabs on top, scrubber on its own row, dateline
+   * below as a stacked sequence — no fancy two-column dateline grid at
+   * this width. The hairlines stay so the masthead still reads as a
+   * composed block. */
+  .cal-masthead { margin: 10px 0 14px; }
+  .cal-masthead-rail { padding: 10px 0 12px; gap: 14px; }
+  .cal-subtabs { gap: 18px; }
+  .cal-subtab { padding: 4px 0 6px; }
   .cal-subtab .cs-label { font-size: 18px; }
-  .cal-subtab .cs-hint { display: none; }   /* the label alone is enough at this width */
+  .cal-subtab .cs-hint { display: none; }
 
-  /* Scrubber: smaller dots, tighter labels, hairline-less crowded. */
-  .cal-scrub { padding: 12px 0 22px; margin-bottom: 16px; }
-  .cal-scrub-track { top: 22px; }
-  .cal-scrub-dot { width: 20px; height: 20px; font-size: 9.5px; }
-  .cal-scrub-phases { font-size: 8px; bottom: -2px; }
+  /* Scrubber: smaller dots, tighter labels. */
+  .cal-scrub {
+    grid-template-columns: repeat(10, minmax(0, 1fr));
+    column-gap: 2px;
+  }
+  .cal-scrub-dot { width: 20px; height: 20px; font-size: 9.5px; justify-self: center; }
+  .cal-scrub-phases { font-size: 8px; }
+  .cal-scrub-phases .csp { padding-top: 4px; }
 
-  /* Dateline shrinks; bigger tap targets on the nav buttons. */
-  .cal-dateline { padding: 14px 0 14px; margin-bottom: 14px; }
-  .cal-dateline-row { font-size: 9.5px; }
-  .cal-dateline-display { font-size: 32px; }
-  .cal-dateline-range { font-size: 10.5px; }
-  .cal-dateline-nav .cdn-btn { padding: 10px 16px; font-size: 11px; }
+  /* Dateline goes back to single-column stack at this width. */
+  .cal-dateline {
+    grid-template-columns: 1fr;
+    padding: 12px 0 14px;
+    row-gap: 8px;
+  }
+  .cal-dateline-meta { grid-column: 1; grid-row: auto; font-size: 9.5px; flex-wrap: wrap; }
+  .cal-dateline-nav { grid-column: 1; grid-row: auto; justify-self: stretch; align-self: stretch; border-radius: 4px; }
+  .cal-dateline-nav .cdn-btn { padding: 10px 16px; font-size: 11px; flex: 1; }
+  .cal-dateline-display { grid-column: 1; grid-row: auto; font-size: 32px; }
+  .cal-dateline-range { grid-column: 1; grid-row: auto; justify-self: start; padding-bottom: 0; font-size: 10.5px; }
 
   /* Sticky dateline keeps the week tag + nav visible as you scroll the day stack. */
   .cal-dateline {
@@ -569,12 +732,17 @@
     background:
       linear-gradient(180deg, var(--ed-bg-0) 0%, var(--ed-bg-0) calc(100% - 8px),
                       rgba(13,12,10,0) 100%);
-    padding-bottom: 18px;   /* the gradient bleed gives a subtle shadow into the day cards */
+    padding-bottom: 18px;
   }
 
   /* Day grid → single column. Card padding tightens for mobile thumb width. */
-  .cal-grid { grid-template-columns: 1fr; gap: 1px; }
+  .cal-grid,
+  .cal-grid[data-today-col] {
+    grid-template-columns: 1fr;
+    gap: 1px;
+  }
   .cal-day { min-height: 0; padding: 14px 14px 16px; gap: 9px; }
+  .cal-day.is-empty { min-height: 0; }
 
   /* Today on mobile reads as a slab: stronger top border, brighter wash,
    * a fuller-width oxide left band. The visual difference from other days
@@ -626,7 +794,13 @@
   .cal-day-anchor .cda-title { font-size: 13px; }
   .cal-day-anchor .cda-sub { font-size: 10px; }
   .cal-event { font-size: 11px; line-height: 1.55; }
-  .cal-event-title { font-size: 13px; }
+  .cal-event-title { font-size: 14px; -webkit-line-clamp: 4; }
+  .cev-time { font-size: 10.5px; }
+  /* On a single-column mobile day card there's plenty of width, so let
+   * the time + title row breathe a hair more. */
+  .cal-event-row { column-gap: 10px; grid-template-columns: minmax(52px, max-content) minmax(0, 1fr); }
+  .cal-event-extra,
+  .cal-event .cal-bullets { margin-left: 62px; }
 
   /* Recurring + footer compress to one column. */
   .cal-recur { margin-top: 24px; }

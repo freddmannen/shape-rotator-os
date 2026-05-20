@@ -113,17 +113,54 @@ function boldTimes(htmlSafe) {
   return htmlSafe.replace(/(\d{1,2}:\d{2}(?:\s*[-–—:]\s*\d{1,2}:\d{2})?)/g, '<strong>$1</strong>');
 }
 
+// Split a title line that leads with a time range into { time, rest }.
+// e.g. "12:00-14:00 onsite kickoff" → { time: "12:00–14:00", rest: "onsite kickoff" }
+//      "19:00 founder & sorting hat" → { time: "19:00",       rest: "founder & sorting hat" }
+//      "team check-in"               → { time: "",            rest: "team check-in" }
+// The upstream data is inconsistent about separators (`-`, `–`, `—`, even
+// `:`), and sometimes uses "12:00:14:00" as a range. Normalize all those
+// to an en-dash for display while keeping the original string available
+// to boldTimes for the title fallback.
+function splitLeadingTime(line) {
+  const range = line.match(/^(\d{1,2}:\d{2})\s*[-–—:]\s*(\d{1,2}:\d{2})\s*(.*)$/);
+  if (range) {
+    return { time: `${range[1]}–${range[2]}`, rest: range[3].trim() };
+  }
+  const single = line.match(/^(\d{1,2}:\d{2})\s+(.*)$/);
+  if (single) return { time: single[1], rest: single[2].trim() };
+  const bareTime = line.match(/^(\d{1,2}:\d{2})\s*$/);
+  if (bareTime) return { time: bareTime[1], rest: "" };
+  return { time: "", rest: line.trim() };
+}
+
 // Turn one event block (separated by blank lines in the cell) into
-// structured HTML: title line + a nested bullet tree (one level deep;
-// deeper indentation collapses into the first sublevel).
+// structured HTML. The title row uses a two-column grid: a tight mono
+// time column (~52px, tabular-nums) and a flexible italic title that can
+// wrap to two lines without truncation. Stacking time-over-title in
+// narrow day cards (the previous layout) was clipping titles after two
+// characters; pulling time off the title line frees the whole card
+// width for the words that actually identify the event.
 function renderEventBlock(blockText) {
   const lines = blockText.split("\n").map(l => l.replace(/\s+$/, ""));
   if (!lines.length) return "";
-  const titleHtml = boldTimes(escHtml(lines[0].trim()));
-  const rest = lines.slice(1);
+  const firstRaw = lines[0].trim();
+  let { time, rest } = splitLeadingTime(firstRaw);
+  // Edge case: the first line is JUST a bare time (e.g. "19:00"). Don't
+  // render an empty title cell next to a lonely time stamp — promote the
+  // time to the title slot and drop the time column for this row.
+  let titleText = rest;
+  if (time && !rest) {
+    titleText = time;
+    time = "";
+  } else if (!time && !rest) {
+    titleText = firstRaw;
+  }
+  const titleHtml = titleText ? escHtml(titleText) : "";
+  const timeHtml  = time ? `<span class="cev-time">${escHtml(time)}</span>` : `<span class="cev-time cev-time--empty" aria-hidden="true"></span>`;
+  const tail = lines.slice(1);
   const bullets = [];
   const extras  = [];
-  for (const raw of rest) {
+  for (const raw of tail) {
     if (!raw.trim()) continue;
     const top  = raw.match(/^\s{1,3}-\s+(.+)$/);
     const deep = raw.match(/^\s{4,}-\s+(.+)$/);
@@ -143,7 +180,7 @@ function renderEventBlock(blockText) {
         return `<li>${b.text}${sub}</li>`;
       }).join("")}</ul>`
     : "";
-  return `<span class="cal-event-title">${titleHtml}</span>${extras.join("")}${bulletsHtml}`;
+  return `<div class="cal-event-row">${timeHtml}<span class="cal-event-title">${titleHtml}</span></div>${extras.join("")}${bulletsHtml}`;
 }
 
 // Parse one week's row from the Phala tab structure. Returns:
@@ -343,6 +380,13 @@ export function renderWeekView({
       ${presenceHtml || `<p class="cal-presence-empty">presence view not available on this surface.</p>`}
     </section>`;
 
+  // ── today's column index (0 = mon … 6 = sun, or null if today isn't in
+  // this week). Used by .cal-grid to allocate extra width to today's
+  // column via a CSS custom property — narrow cards everywhere except
+  // today, which gets ~1.6× to give the day-in-progress room to breathe.
+  const todayColIdx = week.days.findIndex(d => d.isToday);
+  const todayColAttr = todayColIdx >= 0 ? `data-today-col="${todayColIdx}"` : "";
+
   return `
     <header class="cal-page-head">
       <div class="cal-page-title-row">
@@ -356,48 +400,55 @@ export function renderWeekView({
 
     ${staleBanner}
 
-    <nav class="cal-subtabs" role="tablist" aria-label="calendar view">
-      <button class="cal-subtab" data-cal-sub="week"     aria-selected="${sub === "week"}"     type="button">
-        <span class="cs-label">week</span>
-        <span class="cs-hint">live schedule</span>
-      </button>
-      <button class="cal-subtab" data-cal-sub="presence" aria-selected="${sub === "presence"}" type="button">
-        <span class="cs-label">presence</span>
-        <span class="cs-hint">who's here, when</span>
-      </button>
-    </nav>
-
     <section class="cal-week" data-cal-view="week" data-phase="${escAttr(phase)}" ${sub === "week" ? "" : "hidden"}>
 
-      <div class="cal-scrub" role="tablist" aria-label="program week">
-        <div class="cal-scrub-track" aria-hidden="true"></div>
-        ${scrubDots}
-        <div class="cal-scrub-phases" aria-hidden="true">
-          <span class="csp m1">m1 · weeks 1–4</span>
-          <span class="csp m2">m2 · weeks 5–9</span>
-          <span class="csp m3">m3 · week 10</span>
+      <div class="cal-masthead" data-phase="${escAttr(phase)}">
+
+        <div class="cal-masthead-rail">
+          <nav class="cal-subtabs" role="tablist" aria-label="calendar view">
+            <button class="cal-subtab" data-cal-sub="week" aria-selected="${sub === "week"}" type="button">
+              <span class="cs-label">week</span>
+              <span class="cs-hint">live schedule</span>
+            </button>
+            <button class="cal-subtab" data-cal-sub="presence" aria-selected="${sub === "presence"}" type="button">
+              <span class="cs-label">presence</span>
+              <span class="cs-hint">who's here, when</span>
+            </button>
+          </nav>
+
+          <div class="cal-scrub" role="tablist" aria-label="program week">
+            <div class="cal-scrub-track" aria-hidden="true"></div>
+            ${scrubDots}
+            <div class="cal-scrub-phases" aria-hidden="true">
+              <span class="csp m1">m1 · 1–4</span>
+              <span class="csp m2">m2 · 5–9</span>
+              <span class="csp m3">m3 · 10</span>
+            </div>
+          </div>
         </div>
+
+        <div class="cal-dateline" data-phase="${escAttr(phase)}">
+          <div class="cal-dateline-meta">
+            <span class="cal-dateline-tag" data-phase="${escAttr(phase)}">w${safeWeekIdx + 1} · ${phase}</span>
+            <span class="cal-dateline-sep" aria-hidden="true">·</span>
+            <span class="cal-dateline-theme">${escHtml(week.theme || "no theme yet")}</span>
+          </div>
+
+          <div class="cal-dateline-nav" role="group" aria-label="week navigation">
+            <button class="cdn-btn" data-cal-nav="prev"  aria-label="previous week" ${safeWeekIdx === 0 ? "disabled" : ""} type="button">←</button>
+            <button class="cdn-btn cdn-today" data-cal-nav="today" type="button">this week</button>
+            <button class="cdn-btn" data-cal-nav="next"  aria-label="next week" ${safeWeekIdx === WEEK_COUNT - 1 ? "disabled" : ""} type="button">→</button>
+          </div>
+
+          <div class="cal-dateline-display">
+            <em class="cal-dateline-ordinal">week ${ordinal(safeWeekIdx + 1)} of ten</em>
+          </div>
+          <div class="cal-dateline-range">${escHtml(week.dateRange || "—")}</div>
+        </div>
+
       </div>
 
-      <div class="cal-dateline" data-phase="${escAttr(phase)}">
-        <div class="cal-dateline-row">
-          <span class="cal-dateline-tag" data-phase="${escAttr(phase)}">w${safeWeekIdx + 1} · ${phase}</span>
-          <span class="cal-dateline-sep" aria-hidden="true">·</span>
-          <span class="cal-dateline-theme">${escHtml(week.theme || "no theme yet")}</span>
-        </div>
-        <div class="cal-dateline-display">
-          <em class="cal-dateline-ordinal">week ${ordinal(safeWeekIdx + 1)} of ten</em>
-        </div>
-        <div class="cal-dateline-range">${escHtml(week.dateRange || "—")}</div>
-
-        <div class="cal-dateline-nav" role="group" aria-label="week navigation">
-          <button class="cdn-btn" data-cal-nav="prev"  aria-label="previous week" ${safeWeekIdx === 0 ? "disabled" : ""} type="button">←</button>
-          <button class="cdn-btn cdn-today" data-cal-nav="today" type="button">this week</button>
-          <button class="cdn-btn" data-cal-nav="next"  aria-label="next week" ${safeWeekIdx === WEEK_COUNT - 1 ? "disabled" : ""} type="button">→</button>
-        </div>
-      </div>
-
-      <div class="cal-grid" role="list">
+      <div class="cal-grid" role="list" ${todayColAttr}>
         ${dayCells}
       </div>
 
@@ -530,16 +581,20 @@ export function renderSkeletonWeek() {
           <div class="csk-bar" style="width:128px;height:9px"></div>
         </div>
       </header>
-      <nav class="cal-subtabs" aria-hidden="true">
-        <div class="csk-bar" style="width:48px;height:20px"></div>
-        <div class="csk-bar" style="width:64px;height:20px"></div>
-      </nav>
       <div class="cal-week">
-        <div class="cal-scrub">${dots}</div>
-        <div class="cal-dateline">
-          <div class="csk-bar" style="width:86px;height:9px;margin-bottom:12px"></div>
-          <div class="csk-bar" style="width:248px;height:46px;margin-bottom:9px"></div>
-          <div class="csk-bar" style="width:132px;height:9px"></div>
+        <div class="cal-masthead">
+          <div class="cal-masthead-rail">
+            <nav class="cal-subtabs" aria-hidden="true">
+              <div class="csk-bar" style="width:48px;height:20px"></div>
+              <div class="csk-bar" style="width:64px;height:20px"></div>
+            </nav>
+            <div class="cal-scrub">${dots}</div>
+          </div>
+          <div class="cal-dateline">
+            <div class="csk-bar" style="width:86px;height:9px;margin-bottom:12px"></div>
+            <div class="csk-bar" style="width:248px;height:46px;margin-bottom:9px"></div>
+            <div class="csk-bar" style="width:132px;height:9px"></div>
+          </div>
         </div>
         <div class="cal-grid" role="list">${dayCols}</div>
       </div>
