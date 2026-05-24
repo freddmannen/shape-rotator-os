@@ -8621,3 +8621,59 @@ boot().catch((e) => {
     bootstrap();
   }
 })();
+
+// ─── Atlas help tooltip (v0.2.13) ───────────────────────────────────
+// A small "(?)" in the corner of the cohort atlas. Click toggles a
+// folded-handbill explainer with: how the clustering works (countries
+// = peers, towns = pages), and what the underlying stack is
+// (searxng-wth-frnds — P2P meta search engine forked from SearXNG).
+(function setupAtlasHelp() {
+  function init() {
+    const btn = document.getElementById("atlas-help-toggle");
+    const panel = document.getElementById("atlas-help-panel");
+    if (!btn || !panel) return;
+    const closeBtn = panel.querySelector(".ahp-close");
+
+    function open() {
+      panel.hidden = false;
+      btn.setAttribute("aria-expanded", "true");
+      // dismiss on outside click + Esc — installed lazily
+      setTimeout(() => {
+        document.addEventListener("mousedown", onOutside, true);
+        document.addEventListener("keydown", onKey, true);
+      }, 0);
+    }
+    function close() {
+      panel.hidden = true;
+      btn.setAttribute("aria-expanded", "false");
+      document.removeEventListener("mousedown", onOutside, true);
+      document.removeEventListener("keydown", onKey, true);
+    }
+    function toggle() {
+      if (panel.hidden) open(); else close();
+    }
+    function onOutside(e) {
+      if (panel.hidden) return;
+      if (panel.contains(e.target) || btn.contains(e.target)) return;
+      close();
+    }
+    function onKey(e) {
+      if (e.key === "Escape") { e.preventDefault(); close(); }
+    }
+
+    btn.addEventListener("click", (e) => { e.stopPropagation(); toggle(); });
+    if (closeBtn) closeBtn.addEventListener("click", close);
+
+    // Auto-close when the tab leaves atlas, so the panel doesn't linger.
+    const obs = new MutationObserver(() => {
+      if (document.body.dataset.activeTab !== "atlas" && !panel.hidden) close();
+    });
+    obs.observe(document.body, { attributes: true, attributeFilter: ["data-active-tab"] });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init, { once: true });
+  } else {
+    init();
+  }
+})();
