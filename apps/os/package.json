@@ -41,9 +41,11 @@
     "files": [
       "main.js",
       "preload.js",
+      "swarm-node.js",
       "swf-node.js",
       "src/**/*",
-      "package.json"
+      "package.json",
+      "node_modules/three/examples/jsm/**/*"
     ],
     "extraMetadata": {
       "main": "main.js"
