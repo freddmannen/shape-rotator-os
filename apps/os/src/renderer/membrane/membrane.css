@@ -994,3 +994,41 @@
   transition: background 160ms ease, border-color 160ms ease;
 }
 .crewid-action:hover { background: rgba(255,122,61,0.12); border-color: var(--membrane-ember); }
+
+/* In-card claim CTA — the prominent "identify yourself" move for an
+   unclaimed credential, so you claim from the big display itself. */
+.crewid-claim {
+  position: relative; z-index: 2;
+  display: flex; align-items: center; gap: 14px;
+  width: 100%; text-align: left; cursor: pointer;
+  padding: 14px 16px; border-radius: 10px;
+  color: var(--membrane-mist);
+  border: 1px solid rgba(255,122,61,0.5);
+  background: linear-gradient(180deg, rgba(255,122,61,0.16), rgba(255,122,61,0.07));
+  box-shadow: 0 0 22px rgba(255,122,61,0.16), inset 0 0 0 1px rgba(255,122,61,0.12);
+  transition: background 200ms ease, box-shadow 200ms ease, transform 160ms ease;
+  animation: crewid-claim-pulse 3s ease-in-out infinite;
+}
+.crewid-claim:hover {
+  background: linear-gradient(180deg, rgba(255,122,61,0.26), rgba(255,122,61,0.12));
+  box-shadow: 0 0 32px rgba(255,122,61,0.3), inset 0 0 0 1px rgba(255,122,61,0.22);
+  transform: translateY(-1px);
+}
+@keyframes crewid-claim-pulse {
+  0%, 100% { box-shadow: 0 0 18px rgba(255,122,61,0.12), inset 0 0 0 1px rgba(255,122,61,0.1); }
+  50% { box-shadow: 0 0 30px rgba(255,122,61,0.26), inset 0 0 0 1px rgba(255,122,61,0.18); }
+}
+.crewid-claim .cc-glyph {
+  font-size: 22px; color: #ff7a3d; line-height: 1;
+  filter: drop-shadow(0 0 8px rgba(255,122,61,0.5));
+}
+.crewid-claim .cc-text { display: flex; flex-direction: column; gap: 3px; }
+.crewid-claim .cc-title {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 13px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--membrane-mist);
+}
+.crewid-claim .cc-sub {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 9px; letter-spacing: 0.14em; text-transform: lowercase; color: rgba(255,154,106,0.9);
+}

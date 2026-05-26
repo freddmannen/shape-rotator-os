@@ -231,8 +231,21 @@ function renderSelfCard(data, tpl) {
       <span class="crewid-comm-meta">${escHtml(c.team || c.role || '')}</span>
     </li>`).join('');
 
-  const actions = (tpl?.actions || []).map((a) =>
-    `<button type="button" class="crewid-action" data-jump-mode="${a.mode}">${a.label}</button>`).join('');
+  // When unclaimed there's nothing to "edit" yet — drop that action; the
+  // primary move is to claim. When claimed, keep the full action set.
+  const actions = (tpl?.actions || [])
+    .filter((a) => claimed || a.mode !== 'profile')
+    .map((a) => `<button type="button" class="crewid-action" data-jump-mode="${a.mode}">${a.label}</button>`).join('');
+  // Prominent in-card claim CTA so the user claims right here, not via the
+  // tiny top-right pill.
+  const claimCta = claimed ? '' : `
+    <button type="button" class="crewid-claim" data-crewid-claim="1">
+      <span class="cc-glyph" aria-hidden="true">⬡</span>
+      <span class="cc-text">
+        <span class="cc-title">claim your credential</span>
+        <span class="cc-sub">identify yourself to the cohort →</span>
+      </span>
+    </button>`;
 
   return `
     <article class="crewid ${claimed ? 'is-claimed' : 'is-unclaimed'}">
@@ -241,7 +254,7 @@ function renderSelfCard(data, tpl) {
 
       <div class="crewid-band">
         <span class="crewid-issuer">⬡ shape rotator os</span>
-        <span class="crewid-doc">crew credential</span>
+        <span class="crewid-doc">${claimed ? 'crew credential' : 'credential · unissued'}</span>
       </div>
 
       <div class="crewid-hero">
@@ -255,6 +268,8 @@ function renderSelfCard(data, tpl) {
           </div>
         </div>
       </div>
+
+      ${claimCta}
 
       <div class="crewid-readouts">
         ${readout('vessel', vessel)}
@@ -569,6 +584,11 @@ export function mountMembrane(container, opts = {}) {
         crewid.classList.add('is-foil');
       });
       crewid.addEventListener('pointerleave', () => crewid.classList.remove('is-foil'));
+      // In-card "claim your credential" CTA → open the enrollment flow
+      // (routes through the identity pill, which owns the modal).
+      crewid.querySelector('[data-crewid-claim]')?.addEventListener('click', () => {
+        document.getElementById('identity-pill')?.click();
+      });
     }
     panelContent.querySelectorAll('[data-jump-mode]').forEach((btn) => {
       btn.addEventListener('click', () => {
