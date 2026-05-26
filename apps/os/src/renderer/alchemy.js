@@ -613,6 +613,11 @@ function computeMembraneData() {
   return {
     self: {
       edgeCount: String(connections.length || allEdges),
+      // Reliable claim signal — ONLY a formal identity claim counts, never
+      // the editor-handle fallback (that mis-flagged the github editor user
+      // as "claimed" and stranded them in an empty field). The membrane uses
+      // this to auto-enter the field for returning claimed users.
+      claimed: !!(identity && identity.record_id),
       profile: profileForPanel,
       connections,
     },

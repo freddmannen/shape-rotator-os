@@ -46,17 +46,16 @@ const PANEL_TEMPLATES = {
   cohort: {
     eyebrow: 'the constellation',
     title: 'cohort',
-    copy: 'every peer in your circle perturbs this membrane. the surface is the network — swells are presence, the rim warms as more peers come online.',
+    copy: 'every peer perturbs this membrane. pick a lens to read the network.',
     stats: [
       { key: 'peers',  val: '—', dataKey: 'peerCount' },
       { key: 'online', val: '—', dataKey: 'onlineCount' },
     ],
-    // Cohort stays jump-only per user spec — peer browsing lives in legacy.
-    inline: null,
-    actions: [
-      { label: 'open network →',       mode: 'constellation' },
-      { label: 'every team + project', mode: 'shapes' },
-    ],
+    // Each constellation lens + the full roster gets a real card you can
+    // click — replaces the old hair-thin "open network →" links that were
+    // lost in blank space. Wired in renderPanelFor via [data-const]/[data-shapes].
+    inline: (data) => renderCohortViews(data),
+    actions: [],
   },
   events: {
     eyebrow: 'who is here when',
@@ -409,6 +408,50 @@ function renderSelfInline(data) {
     </section>`;
 }
 
+// Cohort panel = a set of lenses onto the network. Each is a real card
+// (glyph + name + one-line read) that jumps into the constellation in that
+// sub-view, plus one card for the full roster. The mini line-glyphs echo
+// each lens's actual shape (overlapping circles = clusters, a small DAG =
+// dependencies, a rising scatter = journey, a dot-grid = the roster).
+const COHORT_VIEWS = [
+  {
+    nav: 'const', mode: 'clusters',
+    title: 'clusters', desc: 'teams grouped by shared synergy',
+    glyph: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="9" cy="9.5" r="4.6"/><circle cx="15" cy="9.5" r="4.6"/><circle cx="12" cy="15" r="4.6"/></svg>',
+  },
+  {
+    nav: 'const', mode: 'dependencies',
+    title: 'dependencies', desc: 'who relies on whom',
+    glyph: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6.5 11.5 17M18 6.5 12.5 17"/><circle cx="5" cy="5" r="2.1"/><circle cx="19" cy="5" r="2.1"/><circle cx="12" cy="19" r="2.1"/></svg>',
+  },
+  {
+    nav: 'const', mode: 'journey',
+    title: 'journey', desc: 'every team’s PMF arc',
+    glyph: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><path d="M4 20h16"/><path d="M4 20Q9 7 20 4.5"/><circle cx="9" cy="13.4" r="1.1" fill="currentColor" stroke="none"/><circle cx="13.5" cy="9" r="1.1" fill="currentColor" stroke="none"/><circle cx="18" cy="5.6" r="1.1" fill="currentColor" stroke="none"/></svg>',
+  },
+  {
+    nav: 'shapes',
+    title: 'the full cohort', desc: 'every team + project, up close',
+    glyph: '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="6" cy="6" r="1.5"/><circle cx="12" cy="6" r="1.5"/><circle cx="18" cy="6" r="1.5"/><circle cx="6" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="18" cy="12" r="1.5"/><circle cx="6" cy="18" r="1.5"/><circle cx="12" cy="18" r="1.5"/><circle cx="18" cy="18" r="1.5"/></svg>',
+  },
+];
+
+function renderCohortViews() {
+  const cards = COHORT_VIEWS.map((v) => {
+    const attr = v.nav === 'shapes' ? 'data-shapes="1"' : `data-const="${v.mode}"`;
+    return `
+      <button type="button" class="cohort-view-card" ${attr}>
+        <span class="cvc-glyph" aria-hidden="true">${v.glyph}</span>
+        <span class="cvc-text">
+          <span class="cvc-title">${v.title}</span>
+          <span class="cvc-desc">${v.desc}</span>
+        </span>
+        <span class="cvc-arrow" aria-hidden="true">→</span>
+      </button>`;
+  }).join('');
+  return `<div class="cohort-view-grid">${cards}</div>`;
+}
+
 // ─── panel scaffolding ───────────────────────────────────────────────────
 
 function renderStatList(template, data = {}) {
@@ -619,6 +662,22 @@ export function mountMembrane(container, opts = {}) {
         }
       });
     });
+    // Cohort view cards: a constellation lens (clusters/dependencies/journey)
+    // or the full roster. Jump into the legacy surface on that view.
+    panelContent.querySelectorAll('[data-const]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (typeof window.__srwkAlchemyJump === 'function') {
+          window.__srwkAlchemyJump('constellation', { constellationMode: btn.dataset.const });
+        }
+      });
+    });
+    panelContent.querySelectorAll('[data-shapes]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (typeof window.__srwkAlchemyJump === 'function') {
+          window.__srwkAlchemyJump('shapes');
+        }
+      });
+    });
     // Connection rows: click jumps to that peer's detail page in the
     // legacy cohort (shapes) view.
     panelContent.querySelectorAll('[data-jump-profile]').forEach((row) => {
@@ -645,15 +704,26 @@ export function mountMembrane(container, opts = {}) {
   const sound = createSoundDirector();
 
   // ── fold state ───────────────────────────────────────────────────────
-  // The panel is ALWAYS the default home — never auto-fold (an unclaimed
-  // user must always see the seal + claim). "Enter the field" is an
-  // explicit, deliberate action: it folds the panel away and the orbs
-  // become the full-bleed world. From the field, tapping an orb summons
-  // its panel back; tapping empty space folds away again.
+  // Two homes, gated on whether you've claimed your shape:
+  //   • UNCLAIMED → the panel is home (the "wall with a window" — the claim
+  //     surface). Never auto-fold; an unclaimed user stranded in an empty
+  //     field has no way to claim.
+  //   • CLAIMED → the field is home. On first data load we fold the wall
+  //     away once so a returning member lands among the orbs. Tapping an orb
+  //     summons its panel back; tapping the void folds away again.
+  // The claimed signal comes from self.claimed (a FORMAL identity claim only)
+  // so the github editor user is never mistaken for claimed.
   let folded = false;
+  let didAutoField = false;
   function setFolded(f) {
     folded = !!f;
     container.classList.toggle('membrane-folded', folded);
+  }
+  function maybeAutoEnterField() {
+    if (didAutoField) return;
+    if (!dataStore.self || dataStore.self.claimed !== true) return;
+    didAutoField = true;
+    setFolded(true);
   }
   // Explicit "enter the field" control in the panel footer.
   const foldBtn = document.createElement('button');
@@ -713,6 +783,7 @@ export function mountMembrane(container, opts = {}) {
     getActiveBlob: () => scene.getActiveBlobId(),
     setData(perBlobData) {
       dataStore = { ...dataStore, ...perBlobData };
+      maybeAutoEnterField();
       for (const id of BLOB_IDS) {
         if (perBlobData?.[id] && scene.blobs[id]?.setData) {
           scene.blobs[id].setData(perBlobData[id]);
