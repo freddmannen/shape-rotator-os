@@ -605,28 +605,11 @@ export function mountMembrane(container, opts = {}) {
     const tpl = PANEL_TEMPLATES[id];
     if (!tpl) return;
     panel.dataset.activeBlob = id;
-    // Self gets a bespoke "crew credential" ID card; others use the
-    // generic panel scaffolding.
-    panelContent.innerHTML = id === 'self'
-      ? renderSelfCard(dataStore[id] || {}, tpl)
-      : renderPanelInner(tpl, dataStore[id] || {});
+    // Reverted the bespoke self "seal/credential" card — every blob now
+    // uses the original generic panel scaffolding (header + stats + inline
+    // + actions). Cleaner; the fold/field + claim modal stay.
+    panelContent.innerHTML = renderPanelInner(tpl, dataStore[id] || {});
     panelContent.scrollTop = 0;
-    // Cursor-tracked foil glint on the crew credential (settles flat).
-    const crewid = panelContent.querySelector('.crewid');
-    if (crewid) {
-      crewid.addEventListener('pointermove', (e) => {
-        const r = crewid.getBoundingClientRect();
-        crewid.style.setProperty('--mx', `${(((e.clientX - r.left) / r.width) * 100).toFixed(1)}%`);
-        crewid.style.setProperty('--my', `${(((e.clientY - r.top) / r.height) * 100).toFixed(1)}%`);
-        crewid.classList.add('is-foil');
-      });
-      crewid.addEventListener('pointerleave', () => crewid.classList.remove('is-foil'));
-      // In-card "claim your credential" CTA → open the enrollment flow
-      // (routes through the identity pill, which owns the modal).
-      crewid.querySelector('[data-crewid-claim]')?.addEventListener('click', () => {
-        document.getElementById('identity-pill')?.click();
-      });
-    }
     panelContent.querySelectorAll('[data-jump-mode]').forEach((btn) => {
       btn.addEventListener('click', () => {
         const mode = btn.dataset.jumpMode;
