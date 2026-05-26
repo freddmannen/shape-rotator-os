@@ -345,12 +345,20 @@ export function mountMembrane(container, opts = {}) {
       <canvas class="membrane-canvas"></canvas>
       <svg class="throne-orbital" aria-hidden="true" viewBox="0 0 400 400" preserveAspectRatio="xMidYMid meet">
         <defs>
-          <path id="throne-orbital-path" d="M 200 200 m -180 0 a 180 180 0 1 1 360 0 a 180 180 0 1 1 -360 0" />
+          <!-- Horizontal ellipse so the name orbits left↔right around the orb's
+               middle (not top↔bottom). The word scrolls along it via the
+               startOffset animation added in setOrbitalForBlob(). -->
+          <path id="throne-orbital-path" d="M 8,200 a 192,76 0 1,1 384,0 a 192,76 0 1,1 -384,0" />
         </defs>
         <text>
           <textPath href="#throne-orbital-path" startOffset="0%" data-orbital-text></textPath>
         </text>
       </svg>
+      <div class="membrane-sat-labels" aria-hidden="true">
+        <span class="membrane-sat-label" data-slot="home_a"></span>
+        <span class="membrane-sat-label" data-slot="home_b"></span>
+        <span class="membrane-sat-label" data-slot="home_c"></span>
+      </div>
       <aside class="membrane-panel" data-active-blob="self">
         <div class="membrane-panel-content"></div>
         <footer class="membrane-panel-foot">
@@ -379,44 +387,83 @@ export function mountMembrane(container, opts = {}) {
   const dots = container.querySelectorAll('.membrane-blob-dot');
   const orbital = container.querySelector('.throne-orbital');
   const orbitalText = container.querySelector('[data-orbital-text]');
+  const satLabelEls = {};
+  container.querySelectorAll('.membrane-sat-label').forEach((el) => { satLabelEls[el.dataset.slot] = el; });
+
+  // Resolve a blob's short display name (self → claimed handle or "self").
+  function blobName(id) {
+    const tpl = ORBITAL_LABELS[id];
+    return String((tpl ? tpl(dataStore[id] || {}) : id) || id).trim();
+  }
+
+  // px-per-world at z=0 (fov 38°, cameraZ 4.8). Same math the scene uses to
+  // place blobs — one source of truth so overlays track the 3D orbs exactly.
+  function pxPerWorld(rect) {
+    const halfHeightWorld = Math.tan((38 * Math.PI / 180) / 2) * 4.8;
+    return rect.height / (2 * halfHeightWorld);
+  }
 
   // Throne lives in screen space anchored to the bottom-right corner. The
-  // orbital SVG follows the same anchor — these px values come from
-  // SLOT_OFFSETS (world units) × pxPerWorld (canvas-height-derived). Same
-  // math the scene uses; one source of truth.
+  // orbital SVG follows the same anchor.
   function updateOrbitalGeometry() {
     const rect = container.getBoundingClientRect();
-    // halfHeight world units at z=0 with fov 38°, cameraZ 4.8 → tan(19°)*4.8
-    const halfHeightWorld = Math.tan((38 * Math.PI / 180) / 2) * 4.8;
-    const pxPerWorld = rect.height / (2 * halfHeightWorld);
-    const throneRightPx  = SLOT_OFFSETS.throne.right  * pxPerWorld;
-    const throneBottomPx = SLOT_OFFSETS.throne.bottom * pxPerWorld;
-    const throneRadiusPx = SLOT_OFFSETS.throne.scale  * pxPerWorld;
+    const ppw = pxPerWorld(rect);
+    const throneRightPx  = SLOT_OFFSETS.throne.right  * ppw;
+    const throneBottomPx = SLOT_OFFSETS.throne.bottom * ppw;
+    const throneRadiusPx = SLOT_OFFSETS.throne.scale  * ppw;
     const orbitalRadiusPx = throneRadiusPx * 1.55;
     orbital.style.setProperty('--throne-right',  `${throneRightPx}px`);
     orbital.style.setProperty('--throne-bottom', `${throneBottomPx}px`);
     orbital.style.setProperty('--orbital-radius', `${orbitalRadiusPx}px`);
+    updateSatelliteLabels(rect, ppw);
+  }
+
+  // Background orbs get a static name label pinned just under each so you
+  // know what you're clicking. Text = the blob currently in that home slot
+  // (slots are fixed screen positions; the blob in each changes on swap).
+  function updateSatelliteLabels(rect = container.getBoundingClientRect(), ppw = pxPerWorld(rect)) {
+    for (const slotName of ['home_a', 'home_b', 'home_c']) {
+      const el = satLabelEls[slotName];
+      const off = SLOT_OFFSETS[slotName];
+      if (!el || !off) continue;
+      const id = BLOB_IDS.find((b) => scene.slotFor && scene.slotFor(b) === slotName);
+      if (!id) { el.style.opacity = '0'; continue; }
+      const cx = rect.width - off.right * ppw;
+      const cy = rect.height - off.bottom * ppw;
+      const r = off.scale * ppw;
+      el.textContent = blobName(id);
+      el.style.left = `${cx}px`;
+      el.style.top = `${cy + r + 7}px`;
+      el.style.opacity = '1';
+    }
   }
 
   function setOrbitalForBlob(id) {
     const tpl = ORBITAL_LABELS[id];
     if (!tpl) return;
-    const data = dataStore[id] || {};
-    const name = String(tpl(data) || id).trim();
-    // Repeat the name around the ring with a separator so the big word
-    // visibly orbits the orb. Reps scale to the name length so short names
-    // ("asks") still fill the circumference without one giant gap.
+    const name = blobName(id);
+    // Repeat the name around the ellipse with a separator so the big word
+    // fills the ring; reps scale to the name length.
     const unit = `${name}  ·  `;
-    const reps = Math.max(3, Math.ceil(26 / unit.length));
+    const reps = Math.max(4, Math.ceil(40 / unit.length));
     orbitalText.textContent = unit.repeat(reps);
+    // (Re)attach the scroll animation — setting textContent wipes children.
+    // Scrolling startOffset negative drags the word leftward around the
+    // horizontal ellipse → it orbits left↔right across the orb's front.
+    const NS = 'http://www.w3.org/2000/svg';
+    const anim = document.createElementNS(NS, 'animate');
+    anim.setAttribute('attributeName', 'startOffset');
+    anim.setAttribute('from', '0%');
+    anim.setAttribute('to', '-100%');
+    anim.setAttribute('dur', '52s');
+    anim.setAttribute('repeatCount', 'indefinite');
+    orbitalText.appendChild(anim);
     orbital.classList.add('is-visible');
   }
 
-  // Stars now live in the 3D scene (starfield.js mounted in scene.js).
-  // No more CSS box-shadow approach.
-  updateOrbitalGeometry();
-  const orbitalResize = new ResizeObserver(() => updateOrbitalGeometry());
-  orbitalResize.observe(container);
+  // Orbital geometry init + ResizeObserver are set up AFTER `scene` exists
+  // (updateSatelliteLabels reads scene.slotFor) — see below the scene mount.
+  let orbitalResize = null;
 
   let dataStore = {};
 
@@ -455,7 +502,7 @@ export function mountMembrane(container, opts = {}) {
     });
     // Orbital ring text — fade out → swap → fade in.
     orbital.classList.remove('is-visible');
-    setTimeout(() => setOrbitalForBlob(id), 320);
+    setTimeout(() => { setOrbitalForBlob(id); updateSatelliteLabels(); }, 320);
   }
 
   const sound = createSoundDirector();
@@ -467,6 +514,12 @@ export function mountMembrane(container, opts = {}) {
     },
   });
   console.log('[membrane] scene mounted; blobs:', Object.keys(scene.blobs).join(','));
+
+  // Now that `scene` exists (updateSatelliteLabels reads scene.slotFor),
+  // do the initial geometry pass + keep it synced on resize.
+  updateOrbitalGeometry();
+  orbitalResize = new ResizeObserver(() => updateOrbitalGeometry());
+  orbitalResize.observe(container);
 
   sound.setTonic('self');
   renderPanelFor('self');
@@ -508,13 +561,14 @@ export function mountMembrane(container, opts = {}) {
         // Refresh the orbital text in place when underlying data changes
         // (no fade — data refresh shouldn't feel like a swap).
         setOrbitalForBlob(active);
+        updateSatelliteLabels();
       }
     },
     sound,
     destroy() {
       scene.destroy();
       sound.destroy();
-      orbitalResize.disconnect();
+      orbitalResize?.disconnect();
       container.classList.remove('membrane-host');
       container.innerHTML = '';
     },

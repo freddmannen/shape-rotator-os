@@ -85,27 +85,52 @@
   z-index: 4;
   opacity: 0;
   transition: opacity 600ms cubic-bezier(0.65, 0, 0.05, 1);
-  animation: orbital-spin 80s linear infinite;
-  transform-origin: 50% 50%;
 }
 
 .throne-orbital.is-visible {
-  opacity: 0.85;
-}
-
-@keyframes orbital-spin {
-  from { transform: rotate(0deg); }
-  to   { transform: rotate(360deg); }
+  opacity: 0.92;
 }
 
 .throne-orbital text {
   font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
-  font-size: 23px;
-  font-weight: 600;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  fill: rgba(245, 240, 233, 0.95);
+  /* Dark outline drawn UNDER the fill so the word stays legible when it
+     orbits across the bright wet-glass highlight on the orb. */
+  paint-order: stroke;
+  stroke: rgba(6, 5, 14, 0.92);
+  stroke-width: 4.5px;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 0 4px rgba(0, 0, 0, 0.55));
+}
+
+/* Background-orb name labels — pinned under each satellite orb (positioned
+   in JS via updateSatelliteLabels). Dark halo keeps them readable over the
+   orb's bright highlight. */
+.membrane-sat-labels {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 4;
+}
+
+.membrane-sat-label {
+  position: absolute;
+  transform: translate(-50%, 0);
+  font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 12px;
+  font-weight: 700;
   letter-spacing: 0.16em;
   text-transform: uppercase;
-  fill: rgba(241, 236, 231, 0.82);
-  filter: drop-shadow(0 0 5px rgba(255, 255, 255, 0.22));
+  white-space: nowrap;
+  color: rgba(247, 242, 236, 0.96);
+  -webkit-text-stroke: 0.4px rgba(6, 5, 14, 0.7);
+  text-shadow: 0 0 5px rgba(0, 0, 0, 0.9), 0 1px 2px rgba(0, 0, 0, 0.95);
+  opacity: 0;
+  transition: opacity 420ms ease;
 }
 
 .membrane-host * {
