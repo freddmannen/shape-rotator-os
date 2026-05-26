@@ -887,7 +887,7 @@ function hashStr(s) {
 // evidence 1) without crashing. Old records render fine; older app
 // versions reading newer data never break (the object is additive).
 const JOURNEY_STAGE_LABELS = [
-  null, // 1-indexed
+  "side project", // stage 0 — off the main PMF maturity track
   "idea",
   "problem discovery",
   "problem-solution fit",
@@ -945,7 +945,7 @@ function journeyFor(rec) {
   };
   const pickFrom = (v, list, dflt) => (list.includes(v) ? v : dflt);
   return {
-    stage: clampInt(j.stage, 1, 8, JOURNEY_DEFAULTS.stage),
+    stage: clampInt(j.stage, 0, 8, JOURNEY_DEFAULTS.stage),
     evidence_quality: clampInt(j.evidence_quality, 1, 5, JOURNEY_DEFAULTS.evidence_quality),
     market_upside: clampInt(j.market_upside, 1, 5, JOURNEY_DEFAULTS.market_upside),
     primary_bottleneck: pickFrom(j.primary_bottleneck, JOURNEY_BOTTLENECKS, JOURNEY_DEFAULTS.primary_bottleneck),
@@ -970,6 +970,38 @@ function journeyJitter(recordId, salt) {
   return ((((t ^ (t >>> 14)) >>> 0) % 10000) / 10000) * 2 - 1;
 }
 
+// Market-upside labels (index = upside 1..5).
+const JOURNEY_UPSIDE_LABELS = ["", "niche", "modest", "solid", "large", "category-defining"];
+
+// Human label for a stage value (0 = the off-track "side project").
+function journeyStageLabel(stage) {
+  if (stage === 0) return JOURNEY_STAGE_LABELS[0];
+  return `${stage} · ${JOURNEY_STAGE_LABELS[stage] || "—"}`;
+}
+
+// Read-only PMF/journey block for the record detail page + drawer. Always
+// shown for teams/projects (defaults applied via journeyFor), so the stage
+// placement is visible — and editable via profile → edit.
+function journeyDetailSection(rec, rowClass = "alch-detail-row", kClass = "adr-k", vClass = "adr-v") {
+  const j = journeyFor(rec);
+  const row = (k, v) => v === "" || v == null ? "" :
+    `<div class="${rowClass}"><span class="${kClass}">${escHtml(k)}</span><span class="${vClass}">${escHtml(String(v))}</span></div>`;
+  const rows = [
+    row("stage", journeyStageLabel(j.stage)),
+    row("evidence", `${j.evidence_quality} · ${JOURNEY_EVIDENCE_LABELS[j.evidence_quality] || "—"}`),
+    row("market upside", `${j.market_upside}${JOURNEY_UPSIDE_LABELS[j.market_upside] ? " · " + JOURNEY_UPSIDE_LABELS[j.market_upside] : ""}`),
+    row("bottleneck", j.primary_bottleneck),
+    row("type", j.company_type),
+    row("confidence", j.confidence),
+    row("icp", j.icp),
+    row("problem", j.problem),
+    row("solution", j.solution),
+    row("evidence notes", j.evidence_notes),
+    row("next milestone", j.next_milestone),
+  ].join("");
+  return rows;
+}
+
 function renderJourney() {
   const teams = state.cohort.teams || [];
   const W = 980, H = 540;
@@ -977,15 +1009,18 @@ function renderJourney() {
   const PAD_L = 96, PAD_R = 28, PAD_T = 28, PAD_B = 88;
   const plotW = W - PAD_L - PAD_R;
   const plotH = H - PAD_T - PAD_B;
-  // X = stage (1..8), Y = evidence_quality (1..5, higher = up).
-  const colW = plotW / 8;
+  // X = stage. Column 0 is "side project" — OFF the main maturity track,
+  // set apart by a divider — then stages 1..8 (idea → scale fit). 9 columns.
+  // Y = evidence_quality (1..5, higher = up).
+  const STAGE_COUNT = JOURNEY_STAGE_LABELS.length; // 9 (0..8)
+  const colW = plotW / STAGE_COUNT;
   const rowH = plotH / 5;
-  const xForStage = (stage) => PAD_L + (stage - 0.5) * colW;
+  const xForStage = (stage) => PAD_L + (stage + 0.5) * colW;
   const yForEvidence = (ev) => PAD_T + plotH - (ev - 0.5) * rowH;
 
   // ── grid + axis labels ──
   const gridLines = [];
-  for (let i = 0; i <= 8; i++) {
+  for (let i = 0; i <= STAGE_COUNT; i++) {
     const x = PAD_L + i * colW;
     gridLines.push(`<line class="ac-jgrid" x1="${x.toFixed(1)}" y1="${PAD_T}" x2="${x.toFixed(1)}" y2="${(PAD_T + plotH).toFixed(1)}"/>`);
   }
@@ -993,10 +1028,15 @@ function renderJourney() {
     const y = PAD_T + i * rowH;
     gridLines.push(`<line class="ac-jgrid" x1="${PAD_L}" y1="${y.toFixed(1)}" x2="${(PAD_L + plotW).toFixed(1)}" y2="${y.toFixed(1)}"/>`);
   }
-  const xLabels = JOURNEY_STAGE_LABELS.slice(1).map((lbl, i) => {
-    const stage = i + 1;
+  // Divider between the off-track side-project column (0) and idea (1).
+  const dividerX = PAD_L + colW;
+  gridLines.push(`<line class="ac-jdivider" x1="${dividerX.toFixed(1)}" y1="${(PAD_T - 6).toFixed(1)}" x2="${dividerX.toFixed(1)}" y2="${(PAD_T + plotH + 6).toFixed(1)}"/>`);
+  const xLabels = JOURNEY_STAGE_LABELS.map((lbl, stage) => {
     const x = xForStage(stage);
-    return `<text class="ac-jaxis-x" x="${x.toFixed(1)}" y="${(PAD_T + plotH + 18).toFixed(1)}" text-anchor="middle"><tspan class="ac-jaxis-num">${stage}</tspan> ${escHtml(lbl)}</text>`;
+    // Stage 0 (side project) is off-track — render the label only, no number.
+    const num = stage === 0 ? "" : `<tspan class="ac-jaxis-num">${stage}</tspan> `;
+    const cls = stage === 0 ? "ac-jaxis-x ac-jaxis-x-side" : "ac-jaxis-x";
+    return `<text class="${cls}" x="${x.toFixed(1)}" y="${(PAD_T + plotH + 18).toFixed(1)}" text-anchor="middle">${num}${escHtml(lbl)}</text>`;
   }).join("");
   const yLabels = JOURNEY_EVIDENCE_LABELS.slice(1).map((lbl, i) => {
     const ev = i + 1;
@@ -3680,6 +3720,11 @@ function renderTeamDetail(team) {
         ${team.traction ? `<div class="alch-detail-row"><span class="adr-k">traction</span><span class="adr-v">${escHtml(team.traction)}</span></div>` : ""}
       </section>
 
+      <section class="alch-detail-section">
+        <h3 class="alch-detail-h">pmf · journey</h3>
+        ${journeyDetailSection(team)}
+      </section>
+
       ${(team.paper_basis || team.hackathon_note) ? `
         <section class="alch-detail-section">
           <h3 class="alch-detail-h">credentials</h3>
@@ -3943,6 +3988,10 @@ function openDrawer(recordId) {
       <div class="alch-drawer-row"><span class="dr-k">team</span><span class="dr-v">${m} ${m === 1 ? "person" : "people"}</span></div>
       <div class="alch-drawer-row"><span class="dr-k">geo</span><span class="dr-v">${escHtml(team.geo || "—")}</span></div>
       ${team.traction ? `<div class="alch-drawer-row"><span class="dr-k">traction</span><span class="dr-v">${escHtml(team.traction)}</span></div>` : ""}
+    </section>
+    <section class="alch-drawer-section">
+      <h4>pmf · journey</h4>
+      ${journeyDetailSection(team, "alch-drawer-row", "dr-k", "dr-v")}
     </section>
     ${team.paper_basis || team.hackathon_note ? `
       <section class="alch-drawer-section">
@@ -4653,7 +4702,7 @@ function teamFieldsFor(kind) {
     // ── PMF journey — placed on the constellation › journey spectrum.
     // stage / evidence STORE the integer but SHOW "1 · idea" via {value,label}.
     // All optional + defaulted-at-read; an unset journey plots at idea/vibes.
-    { key: "journey.stage",            label: "pmf · stage",            type: "select", options: JOURNEY_STAGE_LABELS.slice(1).map((l, i) => ({ value: i + 1, label: `${i + 1} · ${l}` })) },
+    { key: "journey.stage",            label: "pmf · stage",            type: "select", options: JOURNEY_STAGE_LABELS.map((l, i) => ({ value: i, label: i === 0 ? l : `${i} · ${l}` })) },
     { key: "journey.evidence_quality", label: "pmf · evidence quality", type: "select", options: JOURNEY_EVIDENCE_LABELS.slice(1).map((l, i) => ({ value: i + 1, label: `${i + 1} · ${l}` })) },
     { key: "journey.market_upside",    label: "pmf · market upside",    type: "select", options: [1, 2, 3, 4, 5].map(n => ({ value: n, label: `${n} · ${["", "niche", "modest", "solid", "large", "category-defining"][n]}` })) },
     { key: "journey.primary_bottleneck", label: "pmf · primary bottleneck", type: "select", options: JOURNEY_BOTTLENECKS },

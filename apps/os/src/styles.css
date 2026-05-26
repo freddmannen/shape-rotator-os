@@ -6525,6 +6525,11 @@ body[data-active-tab="experimental"] #sidebar { padding-top: 0; }
   font-family: var(--font-mono); font-size: 8.5px; letter-spacing: 0.06em; text-transform: lowercase;
 }
 .alch-journey-stage svg .ac-jaxis-num { fill: var(--alchemy-paper-warm); font-weight: 600; }
+/* Divider setting the off-track "side project" column apart from idea→scale-fit. */
+.alch-journey-stage svg .ac-jdivider {
+  stroke: rgba(var(--ink-rgb), 0.28); stroke-width: 1; stroke-dasharray: 3 4;
+}
+.alch-journey-stage svg .ac-jaxis-x-side { fill: var(--alchemy-ink-mute); font-style: italic; opacity: 0.8; }
 .alch-journey-stage svg .ac-jaxis-title {
   fill: var(--alchemy-ink-mute);
   font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase;
