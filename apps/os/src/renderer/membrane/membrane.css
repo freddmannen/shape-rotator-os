@@ -899,6 +899,8 @@
   display: none;
 }
 .alchemy-view[data-alch-mode-current="membrane"] .alchemy-stage {
+  --membrane-shell-menu-width: min(320px, calc(100% - 48px));
+  --membrane-shell-menu-gap: clamp(18px, 2.4vw, 40px);
   display: block;
   isolation: isolate;
   background: var(--membrane-void);
@@ -938,7 +940,7 @@
   bottom: 0;
   left: 0;
   z-index: 10;
-  width: min(320px, calc(100% - 48px)) !important;
+  width: var(--membrane-shell-menu-width) !important;
   flex: none !important;
   padding: 34px 20px 30px 28px !important;
   visibility: hidden;
@@ -966,6 +968,10 @@
   transform: translateX(0);
   transition-delay: 0s, 0s, 0s;
 }
+.alchemy-view[data-alch-mode-current="membrane"][data-alch-menu="open"] .membrane-host:not(.membrane-folded) .membrane-panel {
+  left: calc(var(--membrane-shell-menu-width) + var(--membrane-shell-menu-gap));
+  right: clamp(330px, 31vw, 480px);
+}
 .alchemy-view[data-alch-mode-current="membrane"] .alchemy-rail-btn {
   color: rgba(241, 236, 231, 0.58);
 }
@@ -978,7 +984,8 @@
 
 @media (prefers-reduced-motion: reduce) {
   .alchemy-view[data-alch-mode-current="membrane"] .alchemy-stage::after,
-  .alchemy-view[data-alch-mode-current="membrane"] .alchemy-rail {
+  .alchemy-view[data-alch-mode-current="membrane"] .alchemy-rail,
+  .alchemy-view[data-alch-mode-current="membrane"] .membrane-panel {
     transition: none;
   }
 }
@@ -1283,7 +1290,11 @@
    the full-bleed world. Click an orb to summon a panel back as an overlay;
    click empty space (or ↩) to fold it away again. */
 .membrane-panel {
-  transition: transform 760ms cubic-bezier(0.7, 0, 0.2, 1), opacity 480ms ease;
+  transition:
+    left 420ms cubic-bezier(0.65, 0, 0.05, 1),
+    right 420ms cubic-bezier(0.65, 0, 0.05, 1),
+    transform 760ms cubic-bezier(0.7, 0, 0.2, 1),
+    opacity 480ms ease;
   transform-origin: left center;
 }
 .membrane-folded .membrane-panel {
