@@ -11272,6 +11272,486 @@ textarea.alch-asks-compose-input { resize: vertical; min-height: 74px; }
 .easel-q-btn:hover { color: rgba(240,236,230,0.9); }
 .easel-q-btn[aria-selected="true"] { background: rgba(217,142,106,0.16); color: #e7a886; }
 
+/* ─── easel · two-column ('twocol') layout ──────────────────────────
+   Sidebar (broadcast picker + LAN list + controls) on the left, dominant
+   viewer on the right that switches between your broadcast preview and a
+   LAN stream via tabs at the top. */
+.easel-app--twocol {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  height: 100%;
+  padding: 20px 26px 18px;
+  box-sizing: border-box;
+  min-height: 0;
+}
+.easel-head--compact { display: flex; align-items: flex-start; gap: 16px; flex: 0 0 auto; }
+.easel-head--compact .easel-title { margin: 2px 0 4px; }
+.easel-head--compact .easel-sub { max-width: 60ch; margin: 0; }
+
+.easel-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) 1fr;
+  gap: 18px;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+.easel-side {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+  min-height: 0;
+  padding-right: 6px;
+}
+.easel-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 10px;
+  background: rgba(255,255,255,0.02);
+}
+.easel-panel-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.easel-panel-eyebrow {
+  font-family: var(--sr-font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(240,236,230,0.55);
+}
+.easel-panel-head .easel-status { margin-left: auto; }
+.easel-panel-head .easel-watch-status { margin-left: auto; }
+.easel-panel .easel-sources {
+  max-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-right: 4px;
+}
+.easel-panel .easel-namefield { gap: 4px; }
+.easel-panel .easel-namefield input { width: 100%; }
+.easel-control-row {
+  display: flex; align-items: center; gap: 10px;
+  flex-wrap: wrap;
+}
+.easel-control-row .easel-go { flex: 1; min-width: 100px; }
+
+/* Right pane — viewer. */
+.easel-viewer {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: #000;
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 10px;
+  overflow: hidden;
+  min-height: 0;
+  min-width: 0;
+}
+.easel-viewer-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  background: rgba(255,255,255,0.02);
+  flex: 0 0 auto;
+}
+.easel-viewer-tab {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  padding: 6px 12px;
+  border-radius: 5px;
+  font-family: var(--sr-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  color: rgba(240,236,230,0.55);
+  cursor: pointer;
+  transition: background 150ms ease, color 150ms ease;
+}
+.easel-viewer-tab:hover { color: #f0ece6; background: rgba(255,255,255,0.04); }
+.easel-viewer-tab.is-active {
+  color: #f0ece6;
+  background: rgba(217,142,106,0.16);
+}
+.easel-viewer-meta {
+  margin-left: auto;
+  font-family: var(--sr-font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  color: rgba(240,236,230,0.45);
+}
+.easel-viewer-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.easel-viewer-stage canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+  display: block;
+}
+.easel-viewer-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--sr-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: lowercase;
+  color: rgba(240,236,230,0.50);
+  pointer-events: none;
+  padding: 24px;
+  text-align: center;
+}
+/* Mode-based visibility. */
+.easel-viewer[data-viewer-mode="preview"] [data-watch-canvas],
+.easel-viewer[data-viewer-mode="preview"] [data-watch-overlay],
+.easel-viewer[data-viewer-mode="watch"]   [data-easel-canvas],
+.easel-viewer[data-viewer-mode="watch"]   [data-easel-overlay],
+.easel-viewer[data-viewer-mode="empty"]   [data-watch-canvas],
+.easel-viewer[data-viewer-mode="empty"]   [data-watch-overlay],
+.easel-viewer[data-viewer-mode="empty"]   [data-easel-canvas] { display: none; }
+
+/* ─── easel · twitch-y channel cards (LAN list) ──────────────────────
+   Each LAN NDI source renders as a card: a 16:9 colored thumb with a
+   bold initial avatar + an animated LIVE badge while it's the one we're
+   watching, then bold streamer name + subtle subtitle below. */
+@keyframes easel-live-pulse {
+  0%   { transform: scale(1);   opacity: 1; }
+  50%  { transform: scale(1.5); opacity: 0.45; }
+  100% { transform: scale(1);   opacity: 1; }
+}
+.ews-card {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  gap: 12px;
+  width: 100%;
+  appearance: none;
+  background: rgba(255,255,255,0.025);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 9px;
+  padding: 8px;
+  color: #f0ece6;
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+}
+.ews-card:hover {
+  border-color: rgba(217,142,106,0.4);
+  background: rgba(217,142,106,0.06);
+  transform: translateY(-1px);
+}
+.ews-card.is-watching {
+  border-color: #e0463a;
+  background: rgba(224,70,58,0.10);
+}
+.ews-thumb {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  width: 56px;
+  height: 31.5px;
+  border-radius: 5px;
+  overflow: hidden;
+  /* Restrained dark with a faint sig-color glow — visible until a live
+     thumbnail frame paints over it. */
+  background:
+    radial-gradient(120% 100% at 30% 30%, color-mix(in oklab, var(--ews-sig, #ff7a3d) 22%, #07060a) 0%, #07060a 70%);
+  display: flex; align-items: center; justify-content: center;
+  flex: 0 0 auto;
+}
+.ews-thumb-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  z-index: 0;
+  opacity: 0;
+  transition: opacity 200ms ease;
+}
+.ews-thumb-canvas.has-frame { opacity: 1; }
+/* Once a live frame is showing, hide the avatar so the preview reads
+   clean. Badges (LIVE / watching / YOU) stay visible above. */
+.ews-thumb-canvas.has-frame ~ .ews-avatar { opacity: 0; }
+.ews-card .ews-avatar { transition: opacity 200ms ease; }
+.ews-card .ews-live,
+.ews-card .ews-you,
+.ews-card .ews-watching { z-index: 2; }
+.ews-card .ews-avatar {
+  display: flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  font-family: var(--sr-font-mono);
+  font-size: 10.5px; font-weight: 600;
+  letter-spacing: 0;
+  color: #f0ece6;
+  background: rgba(0, 0, 0, 0.55);
+  box-shadow: inset 0 0 0 1.4px var(--ews-sig, rgba(255,122,61,0.7));
+}
+.ews-card .ews-live {
+  position: absolute;
+  bottom: 2px; left: 2px;
+  display: flex; align-items: center; gap: 4px;
+  padding: 1px 4px 1px 3px;
+  border-radius: 3px;
+  background: #d63a30;
+  color: #fff;
+  font-family: var(--sr-font-mono);
+  font-size: 7.5px; font-weight: 700;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+}
+.ews-card .ews-watching {
+  position: absolute;
+  top: 2px; right: 2px;
+  display: flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px;
+  border-radius: 3px;
+  background: rgba(255, 122, 61, 0.92);
+  color: #07060a;
+  font-size: 8px; font-weight: 700;
+  line-height: 1;
+}
+.ews-card .ews-you {
+  position: absolute;
+  top: 2px; right: 2px;
+  display: flex; align-items: center; justify-content: center;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(255, 122, 61, 0.92);
+  color: #07060a;
+  font-family: var(--sr-font-mono);
+  font-size: 7.5px; font-weight: 700;
+  letter-spacing: 0.10em;
+}
+/* Subtle self-state ring even when not actively in PREVIEW mode. */
+.ews-card.is-self {
+  border-color: rgba(255, 122, 61, 0.45);
+  background: rgba(255, 122, 61, 0.05);
+}
+.ews-card .ews-live-dot {
+  width: 4px; height: 4px;
+  border-radius: 50%;
+  background: #fff;
+  animation: easel-live-pulse 1.4s ease-in-out infinite;
+}
+.ews-card .ews-meta {
+  display: flex; flex-direction: column; gap: 1px; min-width: 0;
+}
+.ews-card .ews-name {
+  font-family: 'Inter Display', 'Inter', system-ui, sans-serif;
+  font-style: italic;
+  font-size: 14px; font-weight: 600;
+  color: #f0ece6;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ews-card .ews-sub {
+  font-family: var(--sr-font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  color: rgba(240,236,230,0.4);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* ─── easel · viewer info bar (player chrome) ────────────────────────
+   The metadata strip under the canvas — avatar + name + LIVE + duration,
+   the way a Twitch stream page reads under the player. */
+.easel-viewer-info {
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px 16px;
+  border-top: 1px solid rgba(255,255,255,0.08);
+  background: linear-gradient(180deg, rgba(255,255,255,0.025), rgba(0,0,0,0.10));
+  flex: 0 0 auto;
+}
+.evi-avatar {
+  display: flex; align-items: center; justify-content: center;
+  width: 42px; height: 42px;
+  border-radius: 50%;
+  font-family: var(--sr-font-mono);
+  font-size: 16px; font-weight: 500;
+  letter-spacing: 0;
+  color: var(--ews-sig, #f0ece6);
+  background: rgba(0, 0, 0, 0.55);
+  box-shadow: inset 0 0 0 1.5px var(--ews-sig, rgba(255,122,61,0.7));
+  flex: 0 0 auto;
+}
+.evi-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+.evi-title-row { display: flex; align-items: center; gap: 10px; }
+.evi-title {
+  font-family: 'Inter Display', 'Inter', system-ui, sans-serif;
+  font-style: italic;
+  font-size: 18px;
+  font-weight: 600;
+  color: #f0ece6;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.evi-live {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 7px 2px 6px;
+  border-radius: 4px;
+  background: #e0463a;
+  color: #fff;
+  font-family: var(--sr-font-mono);
+  font-size: 10px; font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.evi-live-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: #fff;
+  animation: easel-live-pulse 1.4s ease-in-out infinite;
+}
+.evi-meta-row {
+  display: flex; align-items: center; gap: 6px;
+  font-family: var(--sr-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: rgba(240,236,230,0.55);
+}
+.evi-sep { opacity: 0.35; }
+.evi-duration { font-variant-numeric: tabular-nums; }
+.evi-mute {
+  appearance: none;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 50%;
+  width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  color: rgba(240,236,230,0.75);
+  cursor: pointer;
+  margin-left: auto;
+  transition: background 150ms ease, color 150ms ease, border-color 150ms ease;
+}
+.evi-mute:hover { background: rgba(255,255,255,0.08); color: #f0ece6; border-color: rgba(255,122,61,0.4); }
+.evi-mute-glyph[hidden] { display: none; }
+/* Author rules with `display:` override the UA stylesheet's
+   `[hidden] { display: none }` (equal specificity, later wins) — restore
+   the hide for any element we toggle via the hidden attribute. */
+.evi-live[hidden],
+.easel-viewer-overlay[hidden],
+.easel-viewer-info[hidden] { display: none; }
+
+@media (max-width: 900px) {
+  .easel-grid { grid-template-columns: 1fr; }
+}
+
+/* ─── easel · watching the LAN (receive side) ────────────────────────
+   List of NDI sources discoverable on the LAN + a viewer canvas. Lives
+   under the broadcast controls; you can broadcast and watch at once. */
+.easel-watch {
+  display: flex; flex-direction: column; gap: 12px;
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(255,255,255,0.08);
+}
+.easel-watch-head {
+  display: flex; align-items: center; gap: 10px;
+}
+.easel-watch-eyebrow {
+  font-family: var(--sr-font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(240,236,230,0.55);
+}
+.easel-watch-status {
+  font-family: var(--sr-font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  color: rgba(240,236,230,0.4);
+  margin-right: auto;
+}
+.easel-watch-refresh {
+  appearance: none;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: transparent;
+  color: rgba(240,236,230,0.7);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-family: var(--sr-font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  transition: background 150ms ease, color 150ms ease;
+}
+.easel-watch-refresh:hover { background: rgba(255,255,255,0.05); color: #f0ece6; }
+.easel-watch-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.easel-watch-loading,
+.easel-watch-empty {
+  font-family: var(--sr-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: rgba(240,236,230,0.4);
+  padding: 8px 10px;
+}
+.easel-watch-src {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  appearance: none; background: transparent;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 7px;
+  padding: 9px 12px;
+  color: rgba(240,236,230,0.78);
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+  transition: border-color 150ms ease, background 150ms ease, color 150ms ease;
+}
+.easel-watch-src:hover {
+  border-color: rgba(217,142,106,0.35);
+  background: rgba(217,142,106,0.06);
+  color: #f0ece6;
+}
+.easel-watch-src.is-watching {
+  border-color: #57c177;
+  background: rgba(87,193,119,0.10);
+  color: #f0ece6;
+}
+.easel-watch-src .ews-glyph {
+  font-size: 11px;
+  color: rgba(240,236,230,0.5);
+  width: 14px; text-align: center;
+}
+.easel-watch-src.is-watching .ews-glyph { color: #57c177; }
+.easel-watch-src .ews-name {
+  font-family: var(--sr-font-mono);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+}
+.easel-watch-viewer {
+  position: relative;
+  width: 100%;
+  background: #000;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 8px;
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+}
+.easel-watch-canvas { display: block; width: 100%; height: 100%; object-fit: contain; background: #000; }
+.easel-watch-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--sr-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: rgba(240,236,230,0.45);
+  background: linear-gradient(180deg, rgba(0,0,0,0.0), rgba(0,0,0,0.3));
+  pointer-events: none;
+}
+
 /* ─── onboarding · bonus rows ─────────────────────────────────────────
  * Separator between core steps and BONUS steps. The bonus rows are
  * the same step shape but slightly dimmed so the eye reads them as
