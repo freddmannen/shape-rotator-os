@@ -50,6 +50,37 @@ let _watchSources = [];
 let _watchSelected = null;     // name of the source we're currently receiving
 let _watchFrameUnsub = null;   // detach function from window.api.easel.onRxFrame
 let _watchFrames = 0;
+let _watchStartMs = 0;
+let _liveStartMs = 0;
+let _infoTick = null;          // 1s ticker that updates the viewer's duration
+
+// ─── twitch-y helpers ─────────────────────────────────────────────────
+// Deterministic hue from a source name so each "channel" gets a distinct
+// but stable color across renders + clients.
+function hashHue(str) {
+  let h = 0;
+  const s = String(str || "");
+  for (let i = 0; i < s.length; i++) h = ((h * 31) + s.charCodeAt(i)) | 0;
+  return ((h % 360) + 360) % 360;
+}
+// First letter (or • fallback) — used in the avatar circle.
+function initialOf(name) {
+  const m = String(name || "").trim().match(/[A-Za-z0-9]/);
+  return m ? m[0].toUpperCase() : "•";
+}
+// mm:ss / h:mm:ss for the live-duration ticker.
+function fmtDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return "00:00";
+  const s = Math.floor(ms / 1000);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  const pad = (n) => String(n).padStart(2, "0");
+  return h ? `${h}:${pad(m)}:${pad(sec)}` : `${pad(m)}:${pad(sec)}`;
+}
+// Strip the daemon's "HOSTNAME.LAN (foo)" prefix to the friendly inner name.
+function shortName(full) {
+  const m = String(full || "").match(/\(([^)]+)\)\s*$/);
+  return m ? m[1] : String(full || "");
+}
 
 // Output dims = source size scaled down to fit the quality cap, aspect kept,
 // rounded to even (some NDI receivers dislike odd dimensions).
@@ -158,6 +189,20 @@ function renderShell() {
             <div class="easel-viewer-overlay" data-easel-overlay>pick a screen below to preview, then go live</div>
             ${_ndiAvailable ? `<div class="easel-viewer-overlay" data-watch-overlay hidden>pick a stream from the LAN list to watch</div>` : ""}
           </div>
+          <footer class="easel-viewer-info" data-viewer-info hidden>
+            <span class="evi-avatar" data-evi-avatar>•</span>
+            <div class="evi-text">
+              <div class="evi-title-row">
+                <span class="evi-title" data-evi-title>—</span>
+                <span class="evi-live" data-evi-live hidden><span class="evi-live-dot"></span>LIVE</span>
+              </div>
+              <div class="evi-meta-row">
+                <span class="evi-kind" data-evi-kind></span>
+                <span class="evi-sep">·</span>
+                <span class="evi-duration" data-evi-duration>00:00</span>
+              </div>
+            </div>
+          </footer>
         </main>
       </div>
     </div>`;
@@ -211,6 +256,7 @@ function setViewerMode(mode, { user = false } = {}) {
         : "";
   }
   void user; // marker kept for future hooks
+  syncViewerInfo();
 }
 
 async function loadWatchSources() {
@@ -227,15 +273,70 @@ async function loadWatchSources() {
     return;
   }
   list.innerHTML = _watchSources.map((s) => {
-    const sel = _watchSelected === s.name ? " is-watching" : "";
-    return `<li><button type="button" class="easel-watch-src${sel}" data-watch-src="${esc(s.name)}">
-      <span class="ews-glyph" aria-hidden="true">${_watchSelected === s.name ? "▶" : "○"}</span>
-      <span class="ews-name">${esc(s.name)}</span>
+    const active = _watchSelected === s.name;
+    const hue = hashHue(s.name);
+    const initial = initialOf(shortName(s.name));
+    const friendly = esc(shortName(s.name));
+    return `<li><button type="button" class="ews-card${active ? " is-watching" : ""}" data-watch-src="${esc(s.name)}">
+      <span class="ews-thumb" style="--ews-h:${hue}">
+        <span class="ews-avatar" style="--ews-h:${hue}">${esc(initial)}</span>
+        ${active ? `<span class="ews-live"><span class="ews-live-dot"></span>LIVE</span>` : ""}
+      </span>
+      <span class="ews-meta">
+        <span class="ews-name">${friendly}</span>
+        <span class="ews-sub">${esc(s.name)}</span>
+      </span>
     </button></li>`;
   }).join("");
   list.querySelectorAll("[data-watch-src]").forEach((btn) => {
     btn.addEventListener("click", () => watchSelect(btn.getAttribute("data-watch-src")));
   });
+}
+
+// Update the viewer's info bar (avatar + title + LIVE + duration) to match
+// the current mode. Called from setViewerMode, on go/stop, and by the 1s tick.
+function syncViewerInfo() {
+  const info = _stage && _stage.querySelector("[data-viewer-info]");
+  if (!info) return;
+  const mode = _stage.querySelector(".easel-viewer")?.dataset.viewerMode;
+  const avatarEl = _stage.querySelector("[data-evi-avatar]");
+  const titleEl = _stage.querySelector("[data-evi-title]");
+  const kindEl = _stage.querySelector("[data-evi-kind]");
+  const liveEl = _stage.querySelector("[data-evi-live]");
+  const durEl = _stage.querySelector("[data-evi-duration]");
+  let name = "", kind = "", liveNow = false, startMs = 0, hue = 0;
+  if (mode === "preview" && (_live || _selectedId)) {
+    name = _live ? (shortName(_publishedName) || "Easel") : (_sources.find(s => s.id === _selectedId)?.name || "preview");
+    kind = "your broadcast";
+    liveNow = _live;
+    startMs = _liveStartMs;
+    hue = hashHue(name);
+  } else if (mode === "watch" && _watchSelected) {
+    name = shortName(_watchSelected);
+    kind = "LAN · NDI";
+    liveNow = true;
+    startMs = _watchStartMs;
+    hue = hashHue(_watchSelected);
+  } else {
+    info.hidden = true;
+    if (_infoTick) { clearInterval(_infoTick); _infoTick = null; }
+    return;
+  }
+  info.hidden = false;
+  if (avatarEl) {
+    avatarEl.textContent = initialOf(name);
+    avatarEl.style.setProperty("--ews-h", hue);
+  }
+  if (titleEl) titleEl.textContent = name;
+  if (kindEl) kindEl.textContent = kind;
+  if (liveEl) liveEl.hidden = !liveNow;
+  if (durEl) durEl.textContent = liveNow && startMs ? fmtDuration(Date.now() - startMs) : "—";
+  // Keep the duration ticking while a stream is live.
+  if (liveNow && !_infoTick) {
+    _infoTick = setInterval(syncViewerInfo, 1000);
+  } else if (!liveNow && _infoTick) {
+    clearInterval(_infoTick); _infoTick = null;
+  }
 }
 
 async function watchSelect(sourceName) {
@@ -258,6 +359,7 @@ async function watchSelect(sourceName) {
     return;
   }
   _watchFrames = 0;
+  _watchStartMs = Date.now();
   // Re-render the list to mark the selected source.
   await loadWatchSources();
   setViewerMode("watch");
@@ -410,6 +512,7 @@ async function goLive() {
   applyOutputDims();
 
   _live = true;
+  _liveStartMs = Date.now();
   saveEaselPrefs({ ...loadEaselPrefs(), name, sourceId: _selectedId });
   const ov = _stage.querySelector("[data-easel-overlay]");
   if (ov) ov.hidden = true;
@@ -417,10 +520,12 @@ async function goLive() {
   pump();
   _statsTimer = setInterval(refreshStats, 1000);
   refreshStats();
+  syncViewerInfo();
 }
 
 async function stopLive() {
   _live = false;
+  _liveStartMs = 0;
   if (_pumpTimer) { clearTimeout(_pumpTimer); _pumpTimer = null; }
   if (_statsTimer) { clearInterval(_statsTimer); _statsTimer = null; }
   if (_stream) { _stream.getTracks().forEach((t) => t.stop()); _stream = null; }

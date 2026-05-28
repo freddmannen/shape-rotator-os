@@ -11423,6 +11423,163 @@ textarea.alch-asks-compose-input { resize: vertical; min-height: 74px; }
 .easel-viewer[data-viewer-mode="empty"]   [data-watch-overlay],
 .easel-viewer[data-viewer-mode="empty"]   [data-easel-canvas] { display: none; }
 
+/* ─── easel · twitch-y channel cards (LAN list) ──────────────────────
+   Each LAN NDI source renders as a card: a 16:9 colored thumb with a
+   bold initial avatar + an animated LIVE badge while it's the one we're
+   watching, then bold streamer name + subtle subtitle below. */
+@keyframes easel-live-pulse {
+  0%   { transform: scale(1);   opacity: 1; }
+  50%  { transform: scale(1.5); opacity: 0.45; }
+  100% { transform: scale(1);   opacity: 1; }
+}
+.ews-card {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  gap: 12px;
+  width: 100%;
+  appearance: none;
+  background: rgba(255,255,255,0.025);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 9px;
+  padding: 8px;
+  color: #f0ece6;
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+}
+.ews-card:hover {
+  border-color: rgba(217,142,106,0.4);
+  background: rgba(217,142,106,0.06);
+  transform: translateY(-1px);
+}
+.ews-card.is-watching {
+  border-color: #e0463a;
+  background: rgba(224,70,58,0.10);
+}
+.ews-thumb {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  width: 56px;
+  height: 31.5px;
+  border-radius: 5px;
+  overflow: hidden;
+  background:
+    radial-gradient(120% 90% at 30% 30%, hsl(var(--ews-h, 0), 65%, 45%) 0%, hsl(var(--ews-h, 0), 65%, 22%) 60%, #07060a 100%);
+  display: flex; align-items: center; justify-content: center;
+  flex: 0 0 auto;
+}
+.ews-card .ews-avatar {
+  display: flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  font-family: var(--sr-font-mono);
+  font-size: 11px; font-weight: 700;
+  color: #fff;
+  background: hsl(var(--ews-h, 0), 70%, 55%);
+  box-shadow: 0 0 0 1.5px rgba(0,0,0,0.35);
+}
+.ews-card .ews-live {
+  position: absolute;
+  bottom: 2px; left: 2px;
+  display: flex; align-items: center; gap: 4px;
+  padding: 1px 4px 1px 3px;
+  border-radius: 3px;
+  background: #e0463a;
+  color: #fff;
+  font-family: var(--sr-font-mono);
+  font-size: 7.5px; font-weight: 700;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+}
+.ews-card .ews-live-dot {
+  width: 4px; height: 4px;
+  border-radius: 50%;
+  background: #fff;
+  animation: easel-live-pulse 1.4s ease-in-out infinite;
+}
+.ews-card .ews-meta {
+  display: flex; flex-direction: column; gap: 1px; min-width: 0;
+}
+.ews-card .ews-name {
+  font-family: 'Inter Display', 'Inter', system-ui, sans-serif;
+  font-style: italic;
+  font-size: 14px; font-weight: 600;
+  color: #f0ece6;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ews-card .ews-sub {
+  font-family: var(--sr-font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  color: rgba(240,236,230,0.4);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* ─── easel · viewer info bar (player chrome) ────────────────────────
+   The metadata strip under the canvas — avatar + name + LIVE + duration,
+   the way a Twitch stream page reads under the player. */
+.easel-viewer-info {
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px 16px;
+  border-top: 1px solid rgba(255,255,255,0.08);
+  background: linear-gradient(180deg, rgba(255,255,255,0.025), rgba(0,0,0,0.10));
+  flex: 0 0 auto;
+}
+.evi-avatar {
+  display: flex; align-items: center; justify-content: center;
+  width: 42px; height: 42px;
+  border-radius: 50%;
+  font-family: var(--sr-font-mono);
+  font-size: 18px; font-weight: 700;
+  color: #fff;
+  background: radial-gradient(120% 90% at 30% 30%, hsl(var(--ews-h, 0), 70%, 55%) 0%, hsl(var(--ews-h, 0), 70%, 30%) 100%);
+  box-shadow: 0 0 0 1.5px rgba(0,0,0,0.5);
+  flex: 0 0 auto;
+}
+.evi-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+.evi-title-row { display: flex; align-items: center; gap: 10px; }
+.evi-title {
+  font-family: 'Inter Display', 'Inter', system-ui, sans-serif;
+  font-style: italic;
+  font-size: 18px;
+  font-weight: 600;
+  color: #f0ece6;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.evi-live {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 7px 2px 6px;
+  border-radius: 4px;
+  background: #e0463a;
+  color: #fff;
+  font-family: var(--sr-font-mono);
+  font-size: 10px; font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.evi-live-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: #fff;
+  animation: easel-live-pulse 1.4s ease-in-out infinite;
+}
+.evi-meta-row {
+  display: flex; align-items: center; gap: 6px;
+  font-family: var(--sr-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: rgba(240,236,230,0.55);
+}
+.evi-sep { opacity: 0.35; }
+.evi-duration { font-variant-numeric: tabular-nums; }
+/* Author rules with `display:` override the UA stylesheet's
+   `[hidden] { display: none }` (equal specificity, later wins) — restore
+   the hide for any element we toggle via the hidden attribute. */
+.evi-live[hidden],
+.easel-viewer-overlay[hidden],
+.easel-viewer-info[hidden] { display: none; }
+
 @media (max-width: 900px) {
   .easel-grid { grid-template-columns: 1fr; }
 }
