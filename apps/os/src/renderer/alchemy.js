@@ -59,7 +59,7 @@ const DETAIL_LS_KEY   = "srwk:alchemy_detail_v1";
 // once that integration lands; rather than rip out the code and re-write it
 // from git history, the surfaces are simply unwired. See the "feed off"
 // section below this constant for the disabled hooks.
-const ALCHEMY_MODES   = ["membrane", "shapes", "pulse", "constellation", "collab", "calendar", "profile", "onboarding", "program", "asks", "context"];
+const ALCHEMY_MODES   = ["membrane", "shapes", "pulse", "constellation", "intel", "collab", "calendar", "profile", "onboarding", "program", "asks", "context"];
 const MEMBRANE_INTRO_LS_KEY = "srwk:membrane_seen_v1";
 
 const WEEKS_TOTAL = 10;
@@ -407,6 +407,7 @@ function render() {
     else if (state.mode === "shapes") renderShapes();
     else if (state.mode === "pulse") renderPulse();
     else if (state.mode === "constellation") renderConstellation();
+    else if (state.mode === "intel") renderIntel(state.canvas);
     else if (state.mode === "collab") renderCollab();
     else if (state.mode === "calendar") renderCalendar();
     else if (state.mode === "profile") renderProfile();
@@ -427,6 +428,7 @@ function render() {
       // Kick a feed refresh on entry; the timer keeps it warm in background.
       if (state.mode === "feed") refreshFeed({ source: "mode-enter" });
       if (state.mode === "constellation") wireConstellationHover();
+      if (state.mode === "intel") wireIntel(state.canvas);
       if (state.mode === "collab") wireCollab();
       if (state.mode === "calendar") wireCalendar();
       if (state.mode === "onboarding") wireOnboarding();
@@ -1405,11 +1407,6 @@ function constFrameLine(team, deg) {
 }
 
 function renderConstellation() {
-  // MVP handoff: the Constellation rail now hosts vault-backed Intel while the
-  // legacy cohort map remains below for easy rollback during review.
-  renderIntel(state.canvas);
-  return;
-
   const teams = state.cohort.teams;
   const clusters = state.cohort.clusters;
   const mode = state.constellationMode || "clusters";
@@ -1850,10 +1847,6 @@ function closeDetail() {
 
 // ─── constellation hover ─────────────────────────────────────────────
 function wireConstellationHover() {
-  // Keep Intel wiring scoped to the Constellation canvas entrypoint.
-  wireIntel(state.canvas);
-  return;
-
   const stage = state.canvas.querySelector(".alch-constellation-stage");
   if (stage) {
     const groups = stage.querySelectorAll(".ac-node-group");
