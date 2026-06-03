@@ -43,6 +43,7 @@ import { getIdentity } from "./identity.js";
 // the 7-rail nav with a 4-blob constellation. Lives behind data-alch-mode
 // "membrane" so the legacy modes stay reachable while we evaluate.
 import { mountMembrane } from "./membrane/index.js";
+import { renderIntel, wireIntel } from "./intel/intel.js";
 
 const ALCHEMY_LS_KEY  = "srwk:alchemy_mode";
 const PROFILE_LS_KEY  = "srwk:profile_v1";
@@ -1404,6 +1405,11 @@ function constFrameLine(team, deg) {
 }
 
 function renderConstellation() {
+  // MVP handoff: the Constellation rail now hosts vault-backed Intel while the
+  // legacy cohort map remains below for easy rollback during review.
+  renderIntel(state.canvas);
+  return;
+
   const teams = state.cohort.teams;
   const clusters = state.cohort.clusters;
   const mode = state.constellationMode || "clusters";
@@ -1844,6 +1850,10 @@ function closeDetail() {
 
 // ─── constellation hover ─────────────────────────────────────────────
 function wireConstellationHover() {
+  // Keep Intel wiring scoped to the Constellation canvas entrypoint.
+  wireIntel(state.canvas);
+  return;
+
   const stage = state.canvas.querySelector(".alch-constellation-stage");
   if (stage) {
     const groups = stage.querySelectorAll(".ac-node-group");
