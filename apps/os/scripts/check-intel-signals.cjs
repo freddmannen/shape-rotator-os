@@ -6,7 +6,9 @@ const path = require("node:path");
 
 const root = path.resolve(__dirname, "..");
 const signalsPath = path.join(root, "src", "renderer", "intel", "intel-signals.js");
+const dataPath = path.join(root, "src", "renderer", "intel", "intel-data.js");
 const source = fs.readFileSync(signalsPath, "utf8");
+const dataSource = fs.readFileSync(dataPath, "utf8");
 const exportNeedle = "export const INTEL_SIGNALS = ";
 const start = source.indexOf(exportNeedle);
 
@@ -84,6 +86,37 @@ const PRIVATE_RECEIPT_PATTERNS = [
   /\.json\b/i,
 ];
 
+const COHORT_FACING_PRIVATE_PATTERNS = [
+  /\boffice[-_ ]?hours?\b/i,
+  /\bcandidate[-_ ]?interviews?\b/i,
+  /\bproject[-_ ]?applications?\b/i,
+  /\bapplications?\b/i,
+  /\binterviews?\b/i,
+  /\btranscripts?\b/i,
+  /\bdossier\b/i,
+  /\bprivate[-_ ]?vault\b/i,
+  /\boperator[-_ ]?context\b/i,
+];
+
+const PRIVATE_DATA_BUNDLE_PATTERNS = [
+  /\bsourceMix\b/,
+  /\bsourceDocCount\b/,
+  /\bsourceCounts\b/,
+  /\btranscriptCounts\b/,
+  /\btranscriptSummary\b/,
+  /\bdisplayTranscriptCounts\b/,
+  /\bcorpus\//,
+  /\bstatus\//,
+  /\bgraph\//,
+  /\bprivate_or_missing\b/,
+  /\bproject_application\b/,
+  /\bproject_candidate_interview\b/,
+  /\boffice_hours_transcript\b/,
+  /\bnovel_transcript\b/,
+  /\bnovel_reviewed_transcript\b/,
+  /\bweek1_salon_transcript\b/,
+];
+
 const errors = [];
 
 if (signals.length < 4 || signals.length > 6) {
@@ -121,11 +154,19 @@ for (const signal of signals) {
     signal.introduction,
     signal.watchFor,
     signal.limits,
+    ...(signal.chain || []),
+    ...(signal.sourceReceipts || []),
   ].join(" ");
 
   for (const pattern of BANNED_HEADLINE_PATTERNS) {
     if (pattern.test(joinedHeadline)) {
       errors.push(`${signal.id} looks like data/admin/system plumbing: matched ${pattern}`);
+    }
+  }
+
+  for (const pattern of COHORT_FACING_PRIVATE_PATTERNS) {
+    if (pattern.test(joinedHeadline)) {
+      errors.push(`${signal.id} is not cohort-facing safe: matched ${pattern}`);
     }
   }
 
@@ -156,6 +197,12 @@ for (const signal of signals) {
         errors.push(`${signal.id} sourceReceipts must be audience-facing labels, not private vault paths: ${receipt}`);
       }
     }
+  }
+}
+
+for (const pattern of PRIVATE_DATA_BUNDLE_PATTERNS) {
+  if (pattern.test(dataSource)) {
+    errors.push(`intel-data bundle is not cohort-facing safe: matched ${pattern}`);
   }
 }
 

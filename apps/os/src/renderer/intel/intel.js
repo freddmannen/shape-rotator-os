@@ -35,7 +35,7 @@ const KIND_LABELS = {
 const KIND_DOTS = {
   person: "#7cc0c4",
   project: "#d8b25a",
-  transcript: "#9ccb78",
+  reference: "#9ccb78",
   pack: "#e08272",
   osint: "#b4a2d6",
   source: "#b4a2d6",
@@ -62,7 +62,7 @@ function entityType(entity) {
 function entitySubtitle(entity) {
   const subtitle = entity?.subtitle || "";
   if (/\b(?:corpus|status|graph)\//i.test(subtitle)) {
-    return `${entityType(entity)} / audience-facing metadata`;
+    return `${entityType(entity)} / audience-facing context`;
   }
   return subtitle || entity?.displayRole || entityType(entity);
 }
@@ -104,8 +104,7 @@ function entityMatchesQuery(entity, query, relatedSignals = []) {
     entity.subtitle,
     entity.displayRole,
     ...(entity.surfaces || []),
-    ...(entity.sourceMix || []).map((item) => item.label),
-    ...(entity.repos || []).map((repo) => `${repo.name} ${repo.status} ${repo.privacy}`),
+    ...(entity.repos || []).map((repo) => `${repo.name} ${repo.status}`),
     ...relatedSignals.map((signal) => signal.title),
   ].join(" ").toLowerCase().includes(query);
 }
@@ -167,14 +166,15 @@ function metricTiles(data) {
     const entities = data.entities || [];
     const people = entities.filter((entity) => entity.type === "person").length;
     const projects = entities.filter((entity) => entity.type === "project").length;
-    const sourceDocs = entities.reduce((total, entity) => total + (entity.sourceDocCount || 0), 0);
+    const publicRefs = entities.reduce((total, entity) =>
+      total + (entity.surfaces?.length || 0) + (entity.repos?.length || 0), 0);
     const repos = entities.reduce((total, entity) => total + (entity.repos?.length || 0), 0);
     const metrics = [
       ["entities", entities.length],
       ["people", people],
       ["projects", projects],
       ["edges", data.edges?.length || 0],
-      ["source docs", sourceDocs],
+      ["public refs", publicRefs],
       ["repo refs", repos],
     ];
     return metrics.map(([label, value]) => `
@@ -194,7 +194,7 @@ function metricTiles(data) {
     ["inferred", counts.inferred],
     ["speculative", counts.speculative],
     ["actors", actorCount],
-    ["receipts", receiptCount],
+    ["public receipts", receiptCount],
   ];
   return metrics.map(([label, value]) => `
     <div class="intel-metric">
@@ -206,11 +206,11 @@ function metricTiles(data) {
 
 function renderModeSwitch() {
   const modes = [
-    ["signals", "Signals", "coordinator moves"],
+    ["signals", "Signals", "cohort moves"],
     ["data", "Data", "grounding map"],
   ];
   return `
-    <div class="intel-mode-switch" role="tablist" aria-label="Constellation Intel panel">
+    <div class="intel-mode-switch" role="tablist" aria-label="Cohort Intel panel">
       ${modes.map(([mode, label, caption]) => `
         <button
           type="button"
@@ -237,7 +237,7 @@ function renderFilters() {
   const kinds = [...new Set(INTEL_SIGNALS.map((signal) => signal.kind))];
   return `
     <div class="intel-search">
-      <input type="search" data-intel-query aria-label="Filter signals by title, entity, kind, or evidence receipt" placeholder="filter signals, entities, receipts" value="${esc(state.query)}" />
+      <input type="search" data-intel-query aria-label="Filter signals by title, entity, kind, or public receipt" placeholder="filter signals, entities, public receipts" value="${esc(state.query)}" />
       <div class="intel-filter-row" role="group" aria-label="signal tier filter">
         ${["all", ...TIER_ORDER].map((tier) => `
           <button type="button" data-intel-tier="${esc(tier)}" class="${state.tier === tier ? "is-active" : ""}">
@@ -285,7 +285,7 @@ function renderDataFilters(data) {
   const types = ["all", ...[...new Set((data.entities || []).map((entity) => entity.type))].sort()];
   return `
     <div class="intel-search">
-      <input type="search" data-intel-data-query aria-label="Filter data entities by person, project, surface, source, or linked signal" placeholder="filter people, projects, surfaces, receipts" value="${esc(state.dataQuery)}" />
+      <input type="search" data-intel-data-query aria-label="Filter data entities by person, project, surface, public reference, or linked signal" placeholder="filter people, projects, surfaces, public refs" value="${esc(state.dataQuery)}" />
       <div class="intel-filter-row" role="group" aria-label="data type filter">
         ${types.map((type) => `
           <button type="button" data-intel-data-type="${esc(type)}" class="${state.dataType === type ? "is-active" : ""}">
@@ -393,11 +393,11 @@ function renderDisplayEntityPills(signal, data) {
 }
 
 function renderSourceReceipts(paths) {
-  if (!paths?.length) return `<p class="intel-muted">No source receipts attached.</p>`;
+  if (!paths?.length) return `<p class="intel-muted">No public receipts attached.</p>`;
   return paths.map((path) => `
     <div class="intel-path-row">
       <code>${esc(path)}</code>
-      <button type="button" data-intel-copy="${esc(path)}">copy receipt</button>
+      <button type="button" data-intel-copy="${esc(path)}">copy label</button>
     </div>
   `).join("");
 }
@@ -437,7 +437,7 @@ function renderSignalDetail(signal, data) {
       </section>
       <footer class="intel-signal-foot">
         <div>
-          <span>coordinator move</span>
+          <span>cohort move</span>
           ${esc(signal.coordinatorMove || signal.whyItMatters)}
         </div>
         <div>
@@ -447,17 +447,17 @@ function renderSignalDetail(signal, data) {
       </footer>
       ${renderBriefingField("limits", signal.limits, "limits")}
       <section class="intel-source-section">
-        <h3>Evidence receipts</h3>
+        <h3>Public receipts</h3>
         ${renderSourceReceipts(signal.sourceReceipts || [])}
       </section>
     </section>
   `;
 }
 
-function sourceMix(entity) {
-  return (entity?.sourceMix || []).map((item) =>
-    `<span class="intel-pill"><strong>${esc(item.count)}</strong> ${esc(item.label)}</span>`
-  ).join("");
+function publicRefs(entity) {
+  const surfaces = (entity?.surfaces || []).map((surface) => `<span class="intel-pill">${esc(surface)}</span>`);
+  const repos = (entity?.repos || []).map((repo) => `<span class="intel-pill">${esc(repo.name || repo.id || "repo")}</span>`);
+  return [...surfaces, ...repos].join("");
 }
 
 function renderEntityContext(signal, data) {
@@ -467,7 +467,7 @@ function renderEntityContext(signal, data) {
     <aside class="intel-context">
       <div class="intel-section-head">
         <h3>Mapped context</h3>
-        <p>supporting receipts</p>
+        <p>public context</p>
       </div>
       ${items.map(({ entity }) => {
         const neighbors = neighborsFor(data, entity);
@@ -476,7 +476,7 @@ function renderEntityContext(signal, data) {
             <p class="intel-kicker">${esc(entityType(entity))}</p>
             <h4>${esc(entityTitle(entity))}</h4>
             <p>${esc(entitySubtitle(entity))}</p>
-            <div class="intel-source-mix">${sourceMix(entity) || `<span class="intel-pill">source mix pending</span>`}</div>
+            <div class="intel-source-mix">${publicRefs(entity) || `<span class="intel-pill">public refs pending</span>`}</div>
             <div class="intel-context-neighbors">
               ${neighbors.slice(0, 4).map((neighbor) => `<span>${esc(entityTitle(neighbor))}</span>`).join("") || `<span>no visible neighbors</span>`}
             </div>
@@ -494,7 +494,7 @@ function renderRepoReceipts(entity) {
       ${entity.repos.map((repo) => `
         <div class="intel-repo-row">
           <strong>${esc(repo.name || repo.id || "repo")}</strong>
-          <span>${esc(repo.status || "unknown")} · ${esc(repo.privacy || "unknown")}</span>
+          <span>${esc(repo.status || "public")}</span>
         </div>
       `).join("")}
     </div>
@@ -520,19 +520,19 @@ function renderDataInspector(entity, data) {
           <h2>${esc(entityTitle(entity))}</h2>
           <p>${esc(entitySubtitle(entity))}</p>
         </div>
-        <span class="intel-status">${esc(entity.sensitive ? "held back" : "audience-safe")}</span>
+        <span class="intel-status">cohort-safe</span>
       </header>
 
       <div class="intel-data-stat-grid">
         <div><strong>${esc(entity.coverage || 0)}</strong><span>coverage</span></div>
-        <div><strong>${esc(entity.sourceDocCount || 0)}</strong><span>source docs</span></div>
+        <div><strong>${esc((entity.surfaces?.length || 0) + (entity.repos?.length || 0))}</strong><span>public refs</span></div>
         <div><strong>${esc(entity.neighborCount || neighbors.length || 0)}</strong><span>neighbors</span></div>
         <div><strong>${esc(linkedSignals.length)}</strong><span>signals</span></div>
       </div>
 
       <section>
-        <h3>Source mix</h3>
-        <div class="intel-source-mix">${sourceMix(entity) || `<span class="intel-pill">source mix pending</span>`}</div>
+        <h3>Public references</h3>
+        <div class="intel-source-mix">${publicRefs(entity) || `<span class="intel-pill">public refs pending</span>`}</div>
       </section>
 
       <section>
@@ -581,7 +581,7 @@ function renderSignalGrounding(signal, entity, data) {
           <button type="button" data-intel-open-signal="${esc(signal.id)}">open signal</button>
         </article>
         <section>
-          <h3>Evidence receipts</h3>
+          <h3>Public receipts</h3>
           ${renderSourceReceipts(signal.sourceReceipts || [])}
         </section>
       ` : `<p class="intel-empty">No signal selected.</p>`}
@@ -600,7 +600,7 @@ function renderSignalGrounding(signal, entity, data) {
 
       <section class="intel-boundary-note">
         <h3>Boundary</h3>
-        <p>Data view shows audience-facing metadata, relationship counts, and receipt labels. Corpus files and transcript bodies stay in the vault.</p>
+        <p>Data view shows cohort-facing relationship context and public-reference labels only. Private source provenance stays out of this app bundle.</p>
       </section>
     </aside>
   `;
@@ -656,11 +656,11 @@ function renderShell(container, data) {
         <div>
           <p class="intel-kicker">Shape Rotator Intelligence Vault</p>
           <h1>Intel</h1>
-          <p>Coordinator moves from the vault's cognitive lens layer. ${esc(INTEL_SIGNALS.length)} compressed reads; corpus packs remain truth.</p>
+          <p>Cohort-facing moves from public project records and the sanitized relationship map. ${esc(INTEL_SIGNALS.length)} compressed reads; private source provenance stays out of the app bundle.</p>
         </div>
         <div class="intel-hero-note">
           <span>snapshot ${esc(generatedDate || "unknown")}</span>
-          <span>curated preview · coordinator-facing</span>
+          <span>curated preview · cohort-facing</span>
         </div>
       </header>
       ${renderModeSwitch()}
