@@ -533,6 +533,222 @@ function todayGridEvents(cal) {
   } catch { return []; }
 }
 
+function membraneText(value) {
+  if (Array.isArray(value)) return value.map(membraneText).filter(Boolean).join("; ");
+  return String(value == null ? "" : value).replace(/\s+/g, " ").trim();
+}
+
+function membraneFirstText(...values) {
+  for (const value of values) {
+    if (Array.isArray(value)) {
+      const found = value.map(membraneText).find(Boolean);
+      if (found) return found;
+    } else {
+      const text = membraneText(value);
+      if (text) return text;
+    }
+  }
+  return "";
+}
+
+function membraneLowerFirst(text) {
+  const s = String(text || "");
+  return s ? s[0].toLowerCase() + s.slice(1) : s;
+}
+
+function membraneEntity(record, kind = "team") {
+  if (!record?.record_id) return null;
+  const label = record.name || record.display_name || record.handle || record.record_id;
+  return { id: record.record_id, kind, label };
+}
+
+function membraneMergeEntities(...groups) {
+  const merged = [];
+  const seen = new Set();
+  for (const group of groups) {
+    for (const entity of Array.isArray(group) ? group : []) {
+      if (!entity?.id) continue;
+      const key = `${entity.kind || ""}:${entity.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(entity);
+    }
+  }
+  return merged;
+}
+
+function membraneTrimSentence(text) {
+  return membraneText(text).replace(/[.;]+$/g, "");
+}
+
+function membranePolishPhrase(text) {
+  return membraneText(text)
+    .replace(/\blive fire\b/ig, "live-fire")
+    .replace(/\bnon technical\b/ig, "non-technical");
+}
+
+function buildMembraneSelfInference(record, team, connections = []) {
+  const name = record?.name || record?.display_name || record?.handle || record?.record_id || "this person";
+  const role = membraneFirstText(record?.role, record?.title, record?.role_class);
+  const usefulFor = membraneFirstText(
+    record?.go_to_them_for,
+    record?.offering,
+    record?.contribute_interests,
+    record?.working_style,
+    record?.recurring_themes,
+    record?.skills,
+    record?.skill_areas,
+  );
+  const usefulPhrase = usefulFor.replace(/[.;]+$/g, "");
+  const arena = membraneFirstText(
+    record?.recurring_themes,
+    record?.skill_areas,
+    record?.skills,
+    team?.focus,
+    record?.domain,
+    team?.domain,
+  ).replace(/[.;]+$/g, "");
+  const bio = membraneFirstText(record?.bio, record?.description, record?.about);
+  const evidence = `${role} ${usefulPhrase} ${arena} ${bio}`.toLowerCase();
+  const kind = record?.record_type === "team" || record?.kind === "team" ? "team" : "person";
+  const entities = [membraneEntity(record, kind), membraneEntity(team, "team")].filter(Boolean);
+  const arenaPhrase = /agent/i.test(bio) && /\bcrypto\b/i.test(`${arena} ${bio}`) ? "agent/crypto" : arena;
+  const usefulRead = membraneLowerFirst(membranePolishPhrase(usefulPhrase));
+
+  let text = "";
+  if (usefulPhrase && /feedback|framing|thought partner|non[-\s]?technical|product|react/i.test(evidence)) {
+    text = `Route ${name} rough ${arenaPhrase ? `${arenaPhrase} ` : ""}ideas when you need ${usefulRead}.`;
+  } else if (usefulPhrase && arena) {
+    text = `${name} is a routing fit for ${arena}: go to them for ${usefulRead}.`;
+  } else if (usefulPhrase) {
+    text = `${name}'s strongest routing signal is ${usefulRead}.`;
+  } else if (bio) {
+    const shortBio = bio.length > 170 ? `${bio.slice(0, 155).trim()}...` : bio.replace(/[.;]+$/g, "");
+    text = `${name}'s visible profile suggests this route: ${shortBio}.`;
+  } else if (connections.length) {
+    text = `${name}'s public surface is thin; the clearest signal is ${connections.length} declared cohort connection${connections.length === 1 ? "" : "s"}.`;
+  }
+
+  return text ? { text, entities } : null;
+}
+
+function membraneTimelineWorkSignals(record, team, timelineEvents = []) {
+  const recordId = record?.record_id || "";
+  const teamIds = new Set([team?.record_id, record?.team].filter(Boolean));
+  const handles = new Set([
+    record?.links?.github,
+    record?.gh_handle,
+    record?.handle,
+  ].map((v) => String(v || "").toLowerCase()).filter(Boolean));
+
+  return (Array.isArray(timelineEvents) ? timelineEvents : [])
+    .filter((event) => {
+      if (!event) return false;
+      const actor = String(event.actor || "").toLowerCase();
+      if (recordId && event.person_id === recordId) return true;
+      if (actor && handles.has(actor)) return true;
+      if (event.team_id && teamIds.has(event.team_id)) return true;
+      return false;
+    })
+    .sort((a, b) => (b.at_ms || 0) - (a.at_ms || 0))
+    .slice(0, 2)
+    .map((event) => {
+      const summary = membraneText(event.summary).replace(/[.;]+$/g, "");
+      const repo = membraneText(event.repo);
+      const text = summary ? `${summary}${repo ? ` on ${repo}` : ""}` : "";
+      const source = event.source === "transcript" ? "transcript" : "timeline";
+      return text ? { source, text, entities: [] } : null;
+    })
+    .filter(Boolean);
+}
+
+function buildMembraneWorkSummary(record, team, asks, askIdentity, timelineEvents = []) {
+  const signals = [];
+  const kind = record?.record_type === "team" || record?.kind === "team" ? "team" : "person";
+  const entities = [membraneEntity(record, kind), membraneEntity(team, "team")].filter(Boolean);
+  const push = (source, value, rowEntities = entities) => {
+    const text = membraneText(value);
+    if (text && !signals.some((row) => row.text.toLowerCase() === text.toLowerCase())) {
+      signals.push({ source, text, entities: rowEntities });
+    }
+  };
+
+  push("now", record?.now);
+  push("intent", record?.weekly_intention);
+  for (const signal of membraneTimelineWorkSignals(record, team, timelineEvents)) {
+    push(signal.source, signal.text, signal.entities);
+  }
+  if (team?.now) push("team", `${team.name || team.record_id}: ${team.now}`);
+  if (team?.weekly_goals) push("week", `${team.name || team.record_id}: ${membraneText(team.weekly_goals)}`);
+
+  const mine = (Array.isArray(asks) ? asks : [])
+    .filter((ask) => askIsOpen(ask) && isAskMine(ask, askIdentity))
+    .slice(0, 2);
+  for (const ask of mine) push("ask", askTopic(ask), []);
+
+  push("offers", record?.contribute_interests);
+
+  const now = signals.find((s) => s.source === "now")?.text?.replace(/[.;]+$/g, "");
+  const intent = signals.find((s) => s.source === "intent")?.text?.replace(/[.;]+$/g, "");
+  const timeline = signals.find((s) => s.source === "transcript" || s.source === "timeline")?.text?.replace(/[.;]+$/g, "");
+  const teamNow = signals.find((s) => s.source === "team")?.text?.replace(/[.;]+$/g, "");
+  const ask = signals.find((s) => s.source === "ask")?.text?.replace(/[.;]+$/g, "");
+  const offers = signals.find((s) => s.source === "offers")?.text?.replace(/[.;]+$/g, "");
+
+  let text = "";
+  if (now && timeline) {
+    text = `${now}; latest visible activity: ${membraneLowerFirst(timeline)}.`;
+  } else if (timeline && intent) {
+    text = `Latest visible activity: ${timeline}; stated next move: ${intent}.`;
+  } else if (timeline) {
+    text = `Latest visible activity: ${timeline}.`;
+  } else if (now && intent) {
+    text = `${now}, with ${intent} as the stated next move.`;
+  } else if (now) {
+    text = `${now}.`;
+  } else if (intent) {
+    text = `Said they would do this next: ${intent}.`;
+  } else if (teamNow) {
+    text = `${teamNow}.`;
+  } else if (ask) {
+    text = `Current visible ask: ${ask}.`;
+  } else if (offers) {
+    text = `No fresh work signal; closest current contribution signal is ${membraneLowerFirst(offers)}.`;
+  }
+
+  const sourceDetail = signals.slice(0, 4).map((s) => s.source).join(" + ");
+  return text ? { text, source: "generated", sourceDetail, entities, signals: signals.slice(0, 5) } : null;
+}
+
+function buildMembraneSelfRead(record, team, connections, asks, askIdentity, timelineEvents = []) {
+  const inference = buildMembraneSelfInference(record, team, connections);
+  const work = buildMembraneWorkSummary(record, team, asks, askIdentity, timelineEvents);
+  const entities = membraneMergeEntities(inference?.entities, work?.entities);
+  const hasTimelineSignal = Array.isArray(work?.signals)
+    && work.signals.some((signal) => signal?.source === "timeline" || signal?.source === "transcript");
+  const needsCalibration = connections.length === 0 && !hasTimelineSignal;
+  let text = "";
+
+  if (inference?.text && work?.text) {
+    text = `${membraneTrimSentence(inference.text)}. Current work signal: ${membraneTrimSentence(work.text)}.`;
+  } else if (inference?.text) {
+    text = inference.text;
+  } else if (work?.text) {
+    text = work.text;
+  } else {
+    return null;
+  }
+
+  const sourceDetail = ["routing", work?.sourceDetail].filter(Boolean).join(" + ");
+  return {
+    text: needsCalibration ? `Needs more signal to calibrate. Current read: ${text}` : text,
+    source: "generated",
+    sourceDetail,
+    entities,
+    tone: needsCalibration ? "uncalibrated" : "normal",
+  };
+}
+
 // Cross-blob data feed. Read the cohort surface and shape it into per-blob
 // stat dictionaries that the panels can render. Re-runs on every cohort
 // refresh via subscribeToCohortChanges → render() chain.
@@ -635,9 +851,10 @@ function computeMembraneData() {
   // the self panel can render. Includes teammates (same team), members
   // of teams my team depends on, and people in shared synergy clusters.
   const connections = [];
+  let myTeam = null;
   if (myRecord) {
     const myTeamId = myRecord.team || (myRecord.kind === 'team' ? myRecord.record_id : null);
-    const myTeam = myTeamId ? cohortIndex.teamById.get(myTeamId) : null;
+    myTeam = myTeamId ? cohortIndex.teamById.get(myTeamId) : null;
     const seen = new Set();
     const add = (person, edgeType, team) => {
       if (!person || person.record_id === myRecord.record_id) return;
@@ -683,6 +900,12 @@ function computeMembraneData() {
     }
   }
 
+  const edgeCountValue = connections.length || allEdges;
+  const edgeCountSource = connections.length ? "resolved self graph" : "cohort dependency graph";
+  const selfRead = myRecord
+    ? buildMembraneSelfRead(myRecord, myTeam, connections, asks, askIdentity, state.events)
+    : null;
+
   // Shape the profile object the panel will render. Prefer the full
   // cohort record (rich fields), fall back to the identity claim (just
   // name + kind + record_id), fall back to editor-state user.
@@ -715,7 +938,7 @@ function computeMembraneData() {
 
   return {
     self: {
-      edgeCount: String(connections.length || allEdges),
+      edgeCount: String(edgeCountValue),
       // Reliable claim signal — ONLY a formal identity claim counts, never
       // the editor-handle fallback (that mis-flagged the github editor user
       // as "claimed" and stranded them in an empty field). The membrane uses
@@ -723,6 +946,8 @@ function computeMembraneData() {
       claimed: !!(identity && identity.record_id),
       profile: profileForPanel,
       connections,
+      edgeCountSource,
+      read: selfRead,
     },
     cohort: {
       peerCount: String(people.length),
