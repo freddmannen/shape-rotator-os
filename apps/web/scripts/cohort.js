@@ -1,4 +1,4 @@
-import { renderCohortCard, mountShapesIn, escHtml, escAttr, normalizeLinkHref, buildEditPRUrl } from "@shape-rotator/shape-ui";
+import { renderCohortCard, mountShapesIn, escHtml, escAttr, normalizeLinkHref, buildEditPRUrl, renderProfileForm } from "@shape-rotator/shape-ui";
 
 // Membership taxonomy — mirrored from apps/os/src/renderer/alchemy.js so the
 // web surface filters the same way the Electron app does. The cohort chip is
@@ -136,8 +136,9 @@ function parseDetailHash() {
 
   function renderDetail(rec) {
     const isTeam = (rec.kind || "team") !== "person" && !rec.role_class;
+    const recordType = isTeam ? "team" : "person";
     const editUrl = buildEditPRUrl
-      ? buildEditPRUrl({ recordType: isTeam ? "team" : "person", recordId: rec.record_id })
+      ? buildEditPRUrl({ recordType, recordId: rec.record_id })
       : `https://github.com/dmarzzz/shape-rotator-os/blob/main/cohort-data/${isTeam ? "teams" : "people"}/${rec.record_id}.md`;
     const shapeFam = Number(rec.shape_fam ?? rec.shape ?? 0) || 0;
     const shapeKind = isTeam ? teamKind(rec) : "person";
@@ -156,7 +157,10 @@ function parseDetailHash() {
             <span class="cd-sep">·</span>
             <span class="cd-kind cd-kind-${escHtml(shapeKind)}">${escHtml(shapeKind)}</span>
           </div>
-          <a class="cd-edit" href="${escAttr(editUrl)}" target="_blank" rel="noopener noreferrer">edit on github →</a>
+          <div class="cd-actions">
+            <button class="cd-edit" type="button" data-edit-toggle>edit details</button>
+            <a class="cd-edit cd-edit-raw" href="${escAttr(editUrl)}" target="_blank" rel="noopener noreferrer">raw github</a>
+          </div>
         </header>
         <section class="cd-hero">
           <div class="cd-shape"><canvas data-shape-fam="${shapeFam}" data-shape-kind="${escAttr(shapeKind)}" data-shape-seed="${escAttr(rec.record_id)}"></canvas></div>
@@ -170,6 +174,7 @@ function parseDetailHash() {
             </div>
           </div>
         </section>
+        <section class="cd-section cd-edit-panel" data-edit-panel hidden></section>
         <div class="cd-grid">
           ${linksRow ? `<section class="cd-section"><h3 class="cd-h">links</h3>${linksRow}</section>` : ""}
           ${teamPeople.length ? `
@@ -218,7 +223,10 @@ function parseDetailHash() {
             <span class="cd-sep">·</span>
             <span class="cd-kind cd-kind-person">${escHtml(rec.role_class || "person")}</span>
           </div>
-          <a class="cd-edit" href="${escAttr(editUrl)}" target="_blank" rel="noopener noreferrer">edit on github →</a>
+          <div class="cd-actions">
+            <button class="cd-edit" type="button" data-edit-toggle>edit details</button>
+            <a class="cd-edit cd-edit-raw" href="${escAttr(editUrl)}" target="_blank" rel="noopener noreferrer">raw github</a>
+          </div>
         </header>
         <section class="cd-hero">
           <div class="cd-shape"><canvas data-shape-fam="${shapeFam}" data-shape-kind="person" data-shape-seed="${escAttr(rec.record_id)}"></canvas></div>
@@ -232,6 +240,7 @@ function parseDetailHash() {
             </div>
           </div>
         </section>
+        <section class="cd-section cd-edit-panel" data-edit-panel hidden></section>
         <div class="cd-grid">
           ${rec.bio ? `<section class="cd-section"><h3 class="cd-h">about</h3><p class="cd-bio">${escHtml(rec.bio)}</p></section>` : ""}
           ${linksRow ? `<section class="cd-section"><h3 class="cd-h">links</h3>${linksRow}</section>` : ""}
@@ -243,6 +252,33 @@ function parseDetailHash() {
     detailHost.querySelector(".cd-back")?.addEventListener("click", (e) => {
       e.preventDefault();
       location.hash = "";
+    });
+    const editToggle = detailHost.querySelector("[data-edit-toggle]");
+    const editPanel = detailHost.querySelector("[data-edit-panel]");
+    let editController = null;
+    editToggle?.addEventListener("click", () => {
+      if (!editPanel) return;
+      if (!editPanel.hidden) {
+        editController?.destroy?.();
+        editController = null;
+        editPanel.hidden = true;
+        editPanel.innerHTML = "";
+        editToggle.textContent = "edit details";
+        return;
+      }
+      editPanel.hidden = false;
+      editPanel.innerHTML = `<h3 class="cd-h">edit ${escHtml(isTeam ? shapeKind : "person")}</h3>`;
+      const formMount = document.createElement("div");
+      formMount.className = "cd-edit-form";
+      editPanel.appendChild(formMount);
+      editController = renderProfileForm({
+        recordType,
+        recordId: rec.record_id,
+        initialData: rec,
+        container: formMount,
+      });
+      editToggle.textContent = "hide editor";
+      try { editPanel.scrollIntoView({ block: "start", behavior: "smooth" }); } catch {}
     });
 
     requestAnimationFrame(() => {
