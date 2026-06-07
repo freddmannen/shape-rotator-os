@@ -3246,7 +3246,7 @@ function currentAskContext() {
   const askIdentity = { identity: getIdentity(), profileUser: me, people };
   const myPerson = resolveAskIdentityPerson(askIdentity);
   const myHandle = normalizeAskIdentity(me.github || me.gh_handle || me.handle || me.links?.github);
-  const authorSlug = myPerson?.record_id || me.record_id || (myHandle ? myHandle : "your-slug");
+  const authorSlug = myPerson?.record_id || "your-slug";
   return { people, me, askIdentity, myPerson, myHandle, authorSlug };
 }
 
@@ -3544,7 +3544,11 @@ function renderAsks() {
           </div>
           <div class="alch-asks-compose-row">
             <button class="alch-feed-btn alch-asks-compose-submit" type="submit">submit → open PR</button>
-            <span class="alch-asks-compose-author">posting as <strong>${escHtml(authorSlug)}</strong>${myHandle && authorSlug !== myHandle ? ` · @${escHtml(myHandle)}` : ""}</span>
+            <span class="alch-asks-compose-author">${
+              authorSlug === "your-slug"
+                ? "claim your cohort profile before posting"
+                : `posting as <strong>${escHtml(authorSlug)}</strong>${myHandle && authorSlug !== myHandle ? ` · @${escHtml(myHandle)}` : ""}`
+            }</span>
           </div>
           <div class="alch-asks-compose-result" hidden></div>
         </div>
@@ -3695,6 +3699,12 @@ async function submitAskCompose(form) {
   const result     = form.querySelector(".alch-asks-compose-result");
   if (!result) return;
 
+  if (authorSlug === "your-slug") {
+    result.hidden = false;
+    result.innerHTML = `<p class="alch-onb-inline-line alch-onb-inline-err">claim your cohort profile before posting an ask.</p>`;
+    return;
+  }
+
   if (!topic) {
     result.hidden = false;
     result.innerHTML = `<p class="alch-onb-inline-line alch-onb-inline-err">type a topic first.</p>`;
@@ -3724,7 +3734,7 @@ record_id: ${recordId}
 record_type: ask
 schema_version: 1
 posted_at: ${todayIso}
-author: ${authorSlug}
+author: ${quoteYaml(authorSlug)}
 verb: ${quoteYaml(verb)}
 topic: ${yamlScalar(topic, 2)}
 ${tagsBlock}
