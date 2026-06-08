@@ -1,7 +1,7 @@
 import { createMembraneScene, SLOT_OFFSETS } from './scene.js';
 import { createSoundDirector } from './sound.js';
 import { BLOB_IDS, BLOB_PROFILES } from './blob.js';
-import { askAgeLabel, askIsOpen, askStatus, askTopic, isAskMine, resolveAskAuthor } from '../asks.js';
+import { askAgeLabel, askIsOpen, askStatus, askTopic, isAskMine, resolveAskAuthor, askVerbIconSvg, askVerbVars } from '../asks.js';
 
 function up(s) { return String(s ?? '').toUpperCase(); }
 
@@ -35,14 +35,9 @@ const PANEL_TEMPLATES = {
     copy: '',
     // Avatar pinned to the top-right of the card, same row as the title.
     headAccessory: (data) => renderAvatar(data?.profile || {}),
-    stats: [
-      { key: 'edges', val: '—', dataKey: 'edgeCount' },
-    ],
+    stats: [],
     inline: (data) => renderSelfInline(data),
-    actions: [
-      { label: 'edit profile →', mode: 'profile' },
-      { label: 'onboarding →',   mode: 'onboarding' },
-    ],
+    actions: [],
   },
   cohort: {
     eyebrow: 'the constellation',
@@ -76,11 +71,11 @@ const PANEL_TEMPLATES = {
     title: 'asks',
     copy: 'each open ask is a bubbling point of pressure on the surface. fresh asks rise sharp; expiring asks sink back into the membrane.',
     stats: [
-      { key: 'open',  val: '—', dataKey: 'openAskCount' },
+      { key: 'open',  val: '—', dataKey: 'openAskCount', details: (data) => renderAsksInline(data), open: true },
       { key: 'mine',  val: '—', dataKey: 'myAskCount' },
       { key: 'ask', label: 'post ask', mode: 'asks', opts: { openComposer: true } },
     ],
-    inline: (data) => renderAsksInline(data),
+    inline: null,
     actions: [],
   },
 };
@@ -91,6 +86,51 @@ function escHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   }[c]));
+}
+
+function isLinkBoundary(ch) {
+  return !ch || !/[a-z0-9_-]/i.test(ch);
+}
+
+function renderEntityLink(entity, label) {
+  return `<a class="membrane-entity-link" href="#${escHtml(entity.id)}" data-jump-profile="${escHtml(entity.id)}" data-jump-kind="${escHtml(entity.kind || '')}">${escHtml(label)}</a>`;
+}
+
+function renderLinkedText(text, entities = []) {
+  const source = String(text || '');
+  const options = [];
+  const seen = new Set();
+
+  for (const entity of Array.isArray(entities) ? entities : []) {
+    if (!entity?.id) continue;
+    for (const label of [entity.label, entity.name, entity.id]) {
+      const clean = String(label || '').trim();
+      const key = clean.toLowerCase();
+      if (clean.length < 3 || seen.has(key)) continue;
+      seen.add(key);
+      options.push({ entity, label: clean, lower: key });
+    }
+  }
+  options.sort((a, b) => b.label.length - a.label.length);
+
+  let out = '';
+  let i = 0;
+  let last = 0;
+  const lower = source.toLowerCase();
+  while (i < source.length) {
+    const match = options.find((opt) =>
+      lower.startsWith(opt.lower, i)
+      && isLinkBoundary(source[i - 1])
+      && isLinkBoundary(source[i + opt.label.length])
+    );
+    if (!match) { i += 1; continue; }
+    out += escHtml(source.slice(last, i));
+    out += renderEntityLink(match.entity, source.slice(i, i + match.label.length));
+    i += match.label.length;
+    last = i;
+  }
+  out += escHtml(source.slice(last));
+  return out;
 }
 
 const WD = ['sun','mon','tue','wed','thu','fri','sat'];
@@ -155,13 +195,9 @@ function renderAsksInline(data) {
   const open = asks.filter(askIsOpen);
   if (open.length === 0) {
     return `
-      <section class="membrane-section">
-        <header class="membrane-section-head">
-          <h3 class="membrane-section-title">requests</h3>
-          <span class="membrane-section-count">0</span>
-        </header>
+      <div class="membrane-open-asks">
         <p class="membrane-empty">no open asks. things are quiet.</p>
-      </section>`;
+      </div>`;
   }
   const rows = open.slice(0, 24).map((a) => {
     const title = askTopic(a) || 'untitled ask';
@@ -171,6 +207,7 @@ function renderAsksInline(data) {
     const ago = askAgeLabel(a);
     const verb = a.verb || 'ask';
     const verbGlyph = Array.from(String(verb).trim())[0] || '·';
+    const verbVars = askVerbVars(verbGlyph);
     const status = askStatus(a);
     const statusBadge = status === 'open' && a._expired
       ? '<span class="membrane-ask-status membrane-ask-status-fading">fading</span>'
@@ -185,7 +222,7 @@ function renderAsksInline(data) {
       <li class="membrane-ask-item" data-expired="${a._expired ? '1' : '0'}">
         <details class="membrane-ask-row">
           <summary class="membrane-ask-summary">
-            <span class="membrane-ask-verb" title="${escHtml(verb)}">${escHtml(verbGlyph)}</span>
+            <span class="membrane-ask-verb${verbVars ? ' has-verb-color' : ''}"${verbVars ? ` style="${verbVars}"` : ''} title="${escHtml(verb)}">${askVerbIconSvg(verbGlyph) || escHtml(verbGlyph)}</span>
             <span class="membrane-ask-body">
               <span class="membrane-ask-title">${escHtml(title)}</span>
               <span class="membrane-ask-meta">
@@ -200,13 +237,9 @@ function renderAsksInline(data) {
       </li>`;
   }).join('');
   return `
-    <section class="membrane-section">
-      <header class="membrane-section-head">
-        <h3 class="membrane-section-title">requests</h3>
-        <span class="membrane-section-count">${open.length}</span>
-      </header>
+    <div class="membrane-open-asks">
       <ul class="membrane-ask-list" role="list">${rows}</ul>
-    </section>`;
+    </div>`;
 }
 
 // Tiny stable string hash for deterministic sigils (local; no crypto).
@@ -294,7 +327,7 @@ function renderSelfCard(data, tpl) {
     .map((a) => `<button type="button" class="crewid-action" data-jump-mode="${a.mode}">${a.label}</button>`).join('');
   const claimCta = claimed ? '' : `
     <button type="button" class="crewid-claim seal-strike" data-crewid-claim="1">
-      <span class="cc-glyph" aria-hidden="true">◇</span>
+      <span class="cc-glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 13V8.5C14 7 15 7 15 5a3 3 0 0 0-6 0c0 2 1 2 1 3.5V13"/><path d="M20 15.5a2.5 2.5 0 0 0-2.5-2.5h-11A2.5 2.5 0 0 0 4 15.5V17a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1z"/><path d="M5 22h14"/></svg></span>
       <span class="cc-text">
         <span class="cc-title">strike your seal</span>
         <span class="cc-sub">identify · cross the threshold →</span>
@@ -312,7 +345,7 @@ function renderSelfCard(data, tpl) {
       <div class="crewid-scan" aria-hidden="true"></div>
 
       <div class="crewid-band">
-        <span class="crewid-issuer">⬡ shape rotator · alchemy</span>
+        <span class="crewid-issuer"><svg class="issuer-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg> shape rotator · alchemy</span>
         <span class="crewid-doc">${claimed ? 'sealed' : 'unsealed'}</span>
       </div>
 
@@ -347,9 +380,51 @@ function renderSelfCard(data, tpl) {
     </article>`;
 }
 
+function renderNetworkSection(data, connections = []) {
+  const edgeCount = String(data?.edgeCount ?? connections.length ?? 0);
+  const edgeSource = data?.edgeCountSource || (connections.length ? 'resolved self graph' : 'cohort graph');
+  const connectionCount = connections.length;
+  const tip = connectionCount > 0
+    ? `${edgeCount} membrane edge${Number(edgeCount) === 1 ? '' : 's'}; ${connectionCount} named connection${connectionCount === 1 ? '' : 's'} available. source: ${edgeSource}.`
+    : `${edgeCount} membrane edge${Number(edgeCount) === 1 ? '' : 's'}; no named connections resolved yet. source: ${edgeSource}.`;
+  const countLabel = `${edgeCount} · ${connectionCount} connection${connectionCount === 1 ? '' : 's'}`;
+
+  const ordered = [...connections].sort((a, b) => {
+    const order = { 'teammate': 0, 'depends on': 1, 'depended by': 2 };
+    return (order[a.edgeType] ?? 9) - (order[b.edgeType] ?? 9);
+  });
+
+  const connectionRows = ordered.slice(0, 24).map((c) => `
+    <li class="membrane-event-row membrane-connection-row"
+        data-jump-profile="${escHtml(c.record_id)}"
+        data-jump-kind="${escHtml(c.kind)}"
+        tabindex="0" role="button"
+        aria-label="open ${escHtml(c.name)} in cohort view">
+      <span class="membrane-event-date">${escHtml(c.edgeType)}</span>
+      <span class="membrane-event-title">${escHtml(c.name)}</span>
+      <span class="membrane-event-meta">${escHtml(c.team || c.role || '')}</span>
+    </li>`).join('');
+
+  const body = connectionCount === 0
+    ? `<p class="membrane-network-empty">no named connections yet — once this profile resolves to teammates, dependencies, or a shared cluster, named records appear here.</p>`
+    : `<ul class="membrane-event-list" role="list">${connectionRows}</ul>`;
+
+  return `
+    <details class="membrane-network">
+      <summary class="membrane-network-summary">
+        <span class="membrane-network-title">edges</span>
+        <span class="membrane-network-count" data-tip="${escHtml(tip)}">${escHtml(countLabel)}</span>
+      </summary>
+      <div class="membrane-network-detail">
+        ${body}
+      </div>
+    </details>`;
+}
+
 function renderSelfInline(data) {
   const profile = data?.profile || {};
   const connections = Array.isArray(data?.connections) ? data.connections : [];
+  const read = data?.read || null;
 
   const team = profile.team || (profile.kind === 'team' ? profile.record_id : '') || '';
   const role = profile.role || profile.title || '';
@@ -383,42 +458,15 @@ function renderSelfInline(data) {
       ${truncatedBio ? `<p class="membrane-bio-line">${escHtml(truncatedBio)}</p>` : ''}
     </section>` : '';
 
-  if (connections.length === 0) {
-    return identityBlock + `
-      <section class="membrane-section">
-        <header class="membrane-section-head">
-          <h3 class="membrane-section-title">connections</h3>
-          <span class="membrane-section-count">0</span>
-        </header>
-        <p class="membrane-empty">no edges yet — once you join a team and declare dependencies, your constellation lights up.</p>
-      </section>`;
-  }
-
-  // Group connections by edgeType so similar relationships cluster.
-  const ordered = [...connections].sort((a, b) => {
-    const order = { 'teammate': 0, 'depends on': 1, 'depended by': 2 };
-    return (order[a.edgeType] ?? 9) - (order[b.edgeType] ?? 9);
-  });
-
-  const connectionRows = ordered.slice(0, 24).map((c) => `
-    <li class="membrane-event-row membrane-connection-row"
-        data-jump-profile="${escHtml(c.record_id)}"
-        data-jump-kind="${escHtml(c.kind)}"
-        tabindex="0" role="button"
-        aria-label="open ${escHtml(c.name)} in cohort view">
-      <span class="membrane-event-date">${escHtml(c.edgeType)}</span>
-      <span class="membrane-event-title">${escHtml(c.name)}</span>
-      <span class="membrane-event-meta">${escHtml(c.team || c.role || '')}</span>
-    </li>`).join('');
-
-  return identityBlock + `
-    <section class="membrane-section">
+  const readBlock = read?.text ? `
+    <section class="membrane-section membrane-section-system">
       <header class="membrane-section-head">
-        <h3 class="membrane-section-title">connections</h3>
-        <span class="membrane-section-count">${connections.length}</span>
+        <h3 class="membrane-section-title"${read.sourceDetail ? ` title="${escHtml(read.sourceDetail)}"` : ''}>system read</h3>
       </header>
-      <ul class="membrane-event-list" role="list">${connectionRows}</ul>
-    </section>`;
+      <p class="membrane-system-line${read.tone === 'uncalibrated' ? ' is-uncalibrated' : ''}">${renderLinkedText(read.text, read.entities)}</p>
+    </section>` : '';
+
+  return renderNetworkSection(data, connections) + identityBlock + readBlock;
 }
 
 // Cohort panel = a set of lenses onto the network. Each is a real card
@@ -430,22 +478,22 @@ const COHORT_VIEWS = [
   {
     nav: 'const', mode: 'clusters',
     title: 'clusters', desc: 'teams grouped by shared synergy',
-    glyph: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="9" cy="9.5" r="4.6"/><circle cx="15" cy="9.5" r="4.6"/><circle cx="12" cy="15" r="4.6"/></svg>',
+    glyph: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"/><path d="M20.2 20.2c2.04-2.03.02-7.36-4.5-11.9-4.54-4.52-9.87-6.54-11.9-4.5-2.04 2.03-.02 7.36 4.5 11.9 4.54 4.52 9.87 6.54 11.9 4.5Z"/><path d="M15.7 15.7c4.52-4.54 6.54-9.87 4.5-11.9-2.03-2.04-7.36-.02-11.9 4.5-4.52 4.54-6.54 9.87-4.5 11.9 2.03 2.04 7.36.02 11.9-4.5Z"/></svg>',
   },
   {
     nav: 'const', mode: 'dependencies',
     title: 'dependencies', desc: 'who relies on whom',
-    glyph: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6.5 11.5 17M18 6.5 12.5 17"/><circle cx="5" cy="5" r="2.1"/><circle cx="19" cy="5" r="2.1"/><circle cx="12" cy="19" r="2.1"/></svg>',
+    glyph: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8.3 10a.7.7 0 0 1-.626-1.079L11.4 3a.7.7 0 0 1 1.198-.043L16.3 8.9a.7.7 0 0 1-.572 1.1Z"/><rect x="3" y="14" width="7" height="7" rx="1"/><circle cx="17.5" cy="17.5" r="3.5"/></svg>',
   },
   {
     nav: 'const', mode: 'journey',
     title: 'journey', desc: 'every team’s PMF arc',
-    glyph: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><path d="M4 20h16"/><path d="M4 20Q9 7 20 4.5"/><circle cx="9" cy="13.4" r="1.1" fill="currentColor" stroke="none"/><circle cx="13.5" cy="9" r="1.1" fill="currentColor" stroke="none"/><circle cx="18" cy="5.6" r="1.1" fill="currentColor" stroke="none"/></svg>',
+    glyph: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.106 5.553a2 2 0 0 0 1.788 0l3.659-1.83A1 1 0 0 1 21 4.619v12.764a1 1 0 0 1-.553.894l-4.553 2.277a2 2 0 0 1-1.788 0l-4.212-2.106a2 2 0 0 0-1.788 0l-3.659 1.83A1 1 0 0 1 3 19.381V6.618a1 1 0 0 1 .553-.894l4.553-2.277a2 2 0 0 1 1.788 0z"/><path d="M15 5.764v15"/><path d="M9 3.236v15"/></svg>',
   },
   {
     nav: 'shapes',
     title: 'the full cohort', desc: 'every team + project, up close',
-    glyph: '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="6" cy="6" r="1.5"/><circle cx="12" cy="6" r="1.5"/><circle cx="18" cy="6" r="1.5"/><circle cx="6" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="18" cy="12" r="1.5"/><circle cx="6" cy="18" r="1.5"/><circle cx="12" cy="18" r="1.5"/><circle cx="18" cy="18" r="1.5"/></svg>',
+    glyph: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><path d="M16 3.128a4 4 0 0 1 0 7.744"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><circle cx="9" cy="7" r="4"/></svg>',
   },
 ];
 
@@ -469,6 +517,22 @@ function renderCohortViews() {
 
 function renderStatList(template, data = {}) {
   return template.stats.map((s) => {
+    const v = s.dataKey && data[s.dataKey] != null ? data[s.dataKey] : s.val;
+    if (typeof s.details === 'function') {
+      return `
+        <li class="membrane-panel-list-details">
+          <details class="mpl-details"${s.open ? ' open' : ''}>
+            <summary class="mpl-details-summary">
+              <span class="mpl-key">${escHtml(s.key)}</span>
+              <span class="mpl-detail-meta">
+                <span class="mpl-val">${escHtml(v)}</span>
+                <span class="mpl-caret" aria-hidden="true"></span>
+              </span>
+            </summary>
+            ${s.details(data)}
+          </details>
+        </li>`;
+    }
     if (s.mode) {
       const opts = s.opts ? ` data-jump-opts="${escHtml(JSON.stringify(s.opts))}"` : '';
       return `
@@ -479,7 +543,6 @@ function renderStatList(template, data = {}) {
           </button>
         </li>`;
     }
-    const v = s.dataKey && data[s.dataKey] != null ? data[s.dataKey] : s.val;
     return `<li><span class="mpl-key">${escHtml(s.key)}</span><span class="mpl-val">${escHtml(v)}</span></li>`;
   }).join('');
 }
@@ -495,6 +558,9 @@ function renderPanelInner(template, data = {}) {
   const title = typeof template.title === 'function' ? template.title(data) : template.title;
   const accessory = template.headAccessory ? template.headAccessory(data) : '';
   const actionsHtml = renderActionList(template);
+  const statsHtml = Array.isArray(template.stats) && template.stats.length
+    ? `<ul class="membrane-panel-list" role="list">${renderStatList(template, data)}</ul>`
+    : '';
   return `
     <header class="membrane-panel-head${accessory ? ' membrane-panel-head--with-accessory' : ''}">
       <div class="membrane-panel-head-text">
@@ -504,7 +570,7 @@ function renderPanelInner(template, data = {}) {
       ${accessory}
     </header>
     ${template.copy ? `<p class="membrane-panel-note">${template.copy}</p>` : ''}
-    <ul class="membrane-panel-list" role="list">${renderStatList(template, data)}</ul>
+    ${statsHtml}
     ${inlineHtml}
     ${actionsHtml ? `<ul class="membrane-panel-actions" role="list">${actionsHtml}</ul>` : ''}
   `;
@@ -563,18 +629,27 @@ export function mountMembrane(container, opts = {}) {
       <aside class="membrane-panel" data-active-blob="self">
         <div class="membrane-panel-content"></div>
         <footer class="membrane-panel-foot">
+          <div class="membrane-foot-left">
+            <div class="membrane-blob-dots" role="tablist" aria-label="blobs">
+              ${BLOB_IDS.map((id) => `
+                <button type="button" class="membrane-blob-dot" data-blob-jump="${id}" aria-label="${BLOB_PROFILES[id].label}">
+                  <span class="mbd-label">${BLOB_PROFILES[id].label}</span>
+                </button>
+              `).join('')}
+              <button type="button" class="membrane-blob-dot membrane-footer-dot" data-footer-mode="profile" aria-label="edit profile">
+                <span class="mbd-label">edit profile</span>
+              </button>
+              <button type="button" class="membrane-blob-dot membrane-footer-dot" data-footer-mode="onboarding" aria-label="onboarding">
+                <span class="mbd-label">onboarding</span>
+              </button>
+            </div>
+            <div class="membrane-field-row" data-membrane-field-row></div>
+          </div>
           <button type="button" class="membrane-sound-toggle" data-membrane-sound aria-pressed="false">
-            <span class="mst-glyph" aria-hidden="true">⌒</span>
+            <span class="mst-glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 10v3"/><path d="M6 6v11"/><path d="M10 3v18"/><path d="M14 8v7"/><path d="M18 5v13"/><path d="M22 10v3"/></svg></span>
             <span class="mst-label">hum</span>
             <span class="mst-state">off</span>
           </button>
-          <div class="membrane-blob-dots" role="tablist" aria-label="blobs">
-            ${BLOB_IDS.map((id) => `
-              <button type="button" class="membrane-blob-dot" data-blob-jump="${id}" aria-label="${BLOB_PROFILES[id].label}">
-                <span class="mbd-label">${BLOB_PROFILES[id].label}</span>
-              </button>
-            `).join('')}
-          </div>
         </footer>
       </aside>
     </div>
@@ -709,7 +784,8 @@ export function mountMembrane(container, opts = {}) {
     // Connection rows: click jumps to that peer's detail page in the
     // legacy cohort (shapes) view.
     panelContent.querySelectorAll('[data-jump-profile]').forEach((row) => {
-      const fire = () => {
+      const fire = (ev) => {
+        ev?.preventDefault?.();
         const id = row.dataset.jumpProfile;
         if (!id) return;
         if (typeof window.__srwkAlchemyShowRecord === 'function') {
@@ -718,7 +794,7 @@ export function mountMembrane(container, opts = {}) {
       };
       row.addEventListener('click', fire);
       row.addEventListener('keydown', (ev) => {
-        if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); fire(); }
+        if (ev.key === 'Enter' || ev.key === ' ') { fire(ev); }
       });
     });
     dots.forEach((d) => {
@@ -758,10 +834,11 @@ export function mountMembrane(container, opts = {}) {
   foldBtn.className = 'membrane-enter-field';
   foldBtn.type = 'button';
   foldBtn.setAttribute('aria-label', 'enter the field — fold the panel away');
-  foldBtn.innerHTML = '<span aria-hidden="true">⊹</span><span class="mef-label">enter the field</span>';
+  foldBtn.innerHTML = '<span class="mef-glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg></span><span class="mef-label">enter the field</span>';
   foldBtn.addEventListener('click', () => setFolded(true));
   const panelFoot = panel.querySelector('.membrane-panel-foot');
-  (panelFoot || panel).appendChild(foldBtn);
+  const fieldRow = panel.querySelector('[data-membrane-field-row]');
+  (fieldRow || panelFoot || panel).prepend(foldBtn);
 
   const scene = createMembraneScene(canvas, {
     onActiveChange(id) {
@@ -789,6 +866,15 @@ export function mountMembrane(container, opts = {}) {
     sound.setEnabled(next);
     soundToggle.setAttribute('aria-pressed', String(next));
     soundState.textContent = next ? 'on' : 'off';
+  });
+  container.querySelectorAll('[data-footer-mode]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const mode = btn.dataset.footerMode;
+      if (!mode) return;
+      if (typeof window.__srwkAlchemyJump === 'function') {
+        window.__srwkAlchemyJump(mode);
+      }
+    });
   });
 
   dots.forEach((dot) => {

@@ -17,6 +17,8 @@ async function importRendererModule(relPath) {
 
 const relations = await importRendererModule("apps/os/src/renderer/cohort-relations.js");
 const contextVault = await importRendererModule("apps/os/src/renderer/context-vault-model.js");
+const shapeEscape = await importRendererModule("packages/shape-ui/src/escape.js");
+const vendoredEscape = await importRendererModule("apps/os/src/vendor/shape-ui/escape.js");
 
 test("buildCohortIndex maps local team, person, secondary team, and cluster joins", () => {
   const cohort = {
@@ -83,6 +85,57 @@ test("buildCollabModel derives dependencies, seek-offer matches, affinity, and c
   assert.deepEqual(model.convergence, [{ skill: "tee", teams: ["Offer Studio", "Need Lab", "Third Works"], count: 3 }]);
 });
 
+test("typed dependency records override legacy shorthand without inventing dependency semantics", () => {
+  const teams = [
+    { record_id: "source", name: "Source Lab", dependencies: ["target"] },
+    { record_id: "target", name: "Target Studio" },
+    { record_id: "other", name: "Other Works", dependencies: ["target"] },
+  ];
+  const dependencyRecords = [
+    {
+      record_id: "source-target",
+      record_type: "dependency",
+      source: "source",
+      target: "target",
+      relation: "shares_substrate",
+      status: "exploring",
+      confidence: "medium",
+      reason: "Both teams are working on the same substrate.",
+      evidence: ["Shared substrate field"],
+    },
+    {
+      record_id: "other-target",
+      record_type: "dependency",
+      source: "other",
+      target: "target",
+      status: "active",
+      confidence: "high",
+    },
+  ];
+
+  const edges = relations.constellationDependencyEdges(teams, undefined, dependencyRecords);
+  const typed = edges.find(edge => edge.from === "source" && edge.to === "target");
+  const defaulted = edges.find(edge => edge.from === "other" && edge.to === "target");
+
+  assert.equal(edges.length, 2);
+  assert.equal(relations.dependencyPairKey("source", "target"), "source>target");
+  assert.equal(relations.dependencySafeToken("Shared substrate"), "shared-substrate");
+  assert.equal(typed.normalized, true);
+  assert.equal(typed.id, "source-target");
+  assert.equal(typed.relation, "shares_substrate");
+  assert.equal(typed.relation_label, "shared substrate");
+  assert.equal(typed.status_label, "exploring");
+  assert.deepEqual(typed.evidence, ["Shared substrate field"]);
+  assert.equal(edges.some(edge => edge.id === "legacy:source>target"), false);
+  assert.equal(defaulted.relation, "declared");
+  assert.equal(defaulted.relation_label, "declared link");
+
+  const model = relations.buildCollabModel(teams, [], dependencyRecords);
+  assert.equal(model.deps.size, 2);
+  assert.equal(model.depByPair.get(relations.dependencyPairKey("source", "target")).relation_label, "shared substrate");
+  assert.equal(model.depByPair.get(relations.dependencyPairKey("other", "target")).relation_label, "declared link");
+});
+
 test("aggregateSkillAreas normalizes and dedupes team and person skill tags", () => {
   const cohort = {
     teams: [
@@ -101,6 +154,22 @@ test("aggregateSkillAreas normalizes and dedupes team and person skill tags", ()
   assert.deepEqual(byTag.get("protocol"), { tag: "protocol", teams: ["alpha", "beta"], people: [], size: 2 });
   assert.ok(model.edges.some(edge => edge.a === "protocol" && edge.b === "tee" && edge.weight === 1));
   assert.ok(model.edges.some(edge => edge.a === "protocol" && edge.b === "research" && edge.weight === 1));
+});
+
+test("normalizeGithubAccount canonicalizes profile handles in shared and vendored helpers", () => {
+  for (const helper of [shapeEscape, vendoredEscape]) {
+    assert.equal(helper.normalizeGithubAccount("@cnode"), "cnode");
+    assert.equal(helper.normalizeGithubAccount("https://github.com/CNode?tab=repositories"), "CNode");
+    assert.equal(helper.normalizeGithubAccount("github.com/orgs/teleport"), "teleport");
+    assert.equal(helper.normalizeGithubAccount("not github.com/cnode"), null);
+  }
+});
+
+test("normalizeLinkHref keeps github account links absolute and handle-safe", () => {
+  for (const helper of [shapeEscape, vendoredEscape]) {
+    assert.equal(helper.normalizeLinkHref("github", "@cnode"), "https://github.com/cnode");
+    assert.equal(helper.normalizeLinkHref("github", "github.com/cnode"), "https://github.com/cnode");
+  }
 });
 
 test("context vault helpers resolve raw scripts by id, path, basename, and pending path", () => {

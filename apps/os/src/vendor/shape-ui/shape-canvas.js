@@ -43,6 +43,7 @@ uniform float u_progress;     // 0..1 — reserved for "how far into the cohort"
 uniform float u_intensity;    // 0..1 — reserved for "live activity" pulse strength
 uniform float u_rotationPhase;// 0..1 — reserved for inter-shape morph
 uniform float u_aspect;
+uniform float u_scale;        // 1.0 = base size; >1 enlarges the whole composition
 
 // ── 2D rotation ─────────────────────────────────────────────────────────
 vec2 rot2(vec2 p, float a) {
@@ -83,7 +84,8 @@ const vec3 K_MUSTARD = vec3(1.00, 0.82, 0.12);
 const vec3 K_BURNT   = vec3(1.00, 0.55, 0.15);
 const vec3 K_GREEN   = vec3(0.28, 0.85, 0.55);
 const vec3 K_INK     = vec3(0.04, 0.04, 0.05);
-const vec3 K_PAPER   = vec3(0.137, 0.121, 0.125);  /* warm charcoal canvas (matches --abyss #231F20) */
+uniform vec3 K_PAPER;  /* card backdrop — set per-frame from the app theme: warm charcoal (dark) or warm paper (light) */
+const vec3 K_CANVAS = vec3(0.137, 0.121, 0.125);  /* shape interior — always charcoal so the additive colour layers stay vivid on either theme */
 vec3 kandinsky(float t) {
   float h = fract(t);
   if (h < 0.166) return K_CRIMSON;
@@ -156,7 +158,7 @@ float familyRotation(int fam, float t) {
   if (fam == 2) return 0.0;                           // HEX — static
   if (fam == 3) return sin(t * 0.6) * 0.18;           // PRISM — wobble
   if (fam == 4) return sin(t * 0.7) * 0.32;           // MERIDIAN — pendulum
-  return floor(t * 0.5) * 1.5707963;                  // PLATE — snap 90° every 2s
+  return t * 0.10;                                    // PLATE — continuous spin
 }
 
 // ── Per-family rim symmetry — strategy #1. Rim hue is quantized into
@@ -210,7 +212,7 @@ float specimenSDF(int fam, vec2 p) {
 }
 
 void main() {
-  vec2 uv = v_uv * 2.0 - 1.0;
+  vec2 uv = (v_uv * 2.0 - 1.0) / u_scale;   // u_scale > 1 enlarges the shape
   uv.x *= u_aspect;
 
   // Per-team beat + per-family motion.
@@ -231,11 +233,9 @@ void main() {
   float aa   = fwidth(silh) * 1.5;
   float inside = smoothstep(aa, -aa, silh);           // 1 inside, 0 outside
 
-  // Backdrop: deep canvas that fills the WHOLE card area. Subtle warm
-  // radial vignette toward the centre so each shape feels lit from
-  // within — reads as a glowing specimen against the editorial dark UI.
-  float vign = 1.0 - smoothstep(0.4, 1.4, length(uv));
-  vec3 col = K_PAPER + vec3(0.012, 0.010, 0.020) * vign;
+  // No filled backdrop — the area outside the silhouette stays fully
+  // transparent so the shape floats directly on whatever page/card
+  // background sits behind it (no "box"). See the alpha composite below.
 
   // ── kishimisu fractal interior (only contributes inside the silhouette)
   // Iterative space-fold using the canonical fract(uv*1.5)-0.5 + bright
@@ -362,7 +362,7 @@ void main() {
   // board because the dark background absorbs more than paper did.
   // The per-family specimen mark goes between accents and rim so it
   // reads above hash-noise but never competes with the rim itself.
-  vec3 interior = K_PAPER;
+  vec3 interior = K_CANVAS;
   interior += frac * 1.10;                          // fractal — louder
   interior  = mix(interior, peakC, peak * 0.55);    // rainbow centre glow
   interior += sparkC * spark * 1.10;                // sparkles
@@ -370,19 +370,21 @@ void main() {
   interior  = mix(interior, specC, specBand * 0.95);// per-family specimen mark
   interior  = mix(interior, rimC, rimAlpha);        // iridescent rim band
 
-  // Paint the interior only where the silhouette is.
-  col = mix(col, interior, inside);
+  // Coverage: opaque inside the silhouette, a soft halo just outside it,
+  // fully transparent beyond — so the shape sits on the page background
+  // instead of inside a filled rectangle.
+  float halo  = exp(-max(silh, 0.0) * 14.0) * 0.50;
+  float alpha = clamp(max(inside, halo), 0.0, 1.0);
 
-  // Outer halo — same rim hue, soft falloff, so the shape feels lit
-  // and not cut out of the dark background.
-  float halo = exp(-max(silh, 0.0) * 14.0) * 0.50;
-  col += rimC * halo;
+  // Colour: the composed interior inside the silhouette; the rim hue as a
+  // soft glow in the halo ring just outside it.
+  vec3 outRGB = mix(rimC, interior, inside);
 
-  // Subtle film grain so the dark canvas doesn't read as flat digital.
+  // Subtle film grain so the shape body doesn't read as flat digital.
   float grain = fract(sin(dot(uv, vec2(12.9898, 78.233))) * 43758.5453);
-  col += (grain - 0.5) * 0.018;
+  outRGB += (grain - 0.5) * 0.018;
 
-  outColor = vec4(col, 1.0);
+  outColor = vec4(outRGB, alpha);
 }`;
 
 // ── shared GL program (per <canvas> we still need a fresh context, but
@@ -433,8 +435,19 @@ function buildProgram(gl) {
       intensity:     gl.getUniformLocation(prog, "u_intensity"),
       rotationPhase: gl.getUniformLocation(prog, "u_rotationPhase"),
       aspect:        gl.getUniformLocation(prog, "u_aspect"),
+      scale:         gl.getUniformLocation(prog, "u_scale"),
+      paper:         gl.getUniformLocation(prog, "K_PAPER"),
     },
   };
+}
+
+// Canvas base color follows the app theme. Read straight from the DOM so this
+// vendored module stays decoupled from the app's theme.js; set as the K_PAPER
+// uniform each frame so a light/dark toggle takes effect without a remount.
+function paperRGB() {
+  return document.documentElement.dataset.theme === "light"
+    ? [0.957, 0.937, 0.902]   // #F4EFE6 warm paper
+    : [0.137, 0.121, 0.125];  // #231F20 warm charcoal
 }
 
 // ── hash helpers ────────────────────────────────────────────────────────
@@ -513,6 +526,8 @@ export function mountShape(canvas, opts = {}) {
     gl.uniform1f(prog.uniforms.intensity, intensity);
     gl.uniform1f(prog.uniforms.rotationPhase, rotationPhase);
     gl.uniform1f(prog.uniforms.aspect, canvas.width / canvas.height);
+    gl.uniform1f(prog.uniforms.scale, opts.scale != null ? +opts.scale : 1.0);
+    gl.uniform3fv(prog.uniforms.paper, paperRGB());
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     raf = requestAnimationFrame(frame);
   }
@@ -637,6 +652,7 @@ function mountSharedOverlay(overlay) {
         el,
         family: Number(el.dataset.shapeFam) || 0,
         kind,
+        scale: Number(el.dataset.shapeScale) || 1,
         colors: hashColors(el.dataset.shapeSeed || ""),
       });
     }
@@ -663,6 +679,7 @@ function mountSharedOverlay(overlay) {
     gl.scissor(0, 0, overlay.width, overlay.height);
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.useProgram(prog.prog);
+    const paper = paperRGB();
 
     for (const p of placeholderList()) {
       if (!p.el.isConnected) continue;
@@ -692,6 +709,8 @@ function mountSharedOverlay(overlay) {
       gl.uniform1f(prog.uniforms.intensity, 0.6);
       gl.uniform1f(prog.uniforms.rotationPhase, 0);
       gl.uniform1f(prog.uniforms.aspect, w / h);
+      gl.uniform1f(prog.uniforms.scale, p.scale);
+      gl.uniform3fv(prog.uniforms.paper, paper);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     }
     raf = requestAnimationFrame(frame);

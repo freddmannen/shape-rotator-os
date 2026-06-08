@@ -22,7 +22,7 @@ import {
   // Extracted into shape-ui so the sibling web app can render the same
   // cohort surface. The Electron renderer keeps the same call sites —
   // only the implementations moved.
-  escHtml, escAttr, normalizeLinkHref,
+  escHtml, escAttr, normalizeLinkHref, normalizeGithubAccount,
   buildEditPRUrl,
   teamCardHtml, personCardHtml,
   buildCalendarRows, drawCalendar,
@@ -34,13 +34,15 @@ import {
 } from "@shape-rotator/shape-ui";
 import {
   aggregateSkillAreas, buildCohortIndex, buildCollabModel, collabAffKey,
-  constellationIndegree, constellationModel, teamKind, teamsOfKind,
+  dependencyPairKey, dependencySafeToken,
+  constellationDependencyEdges, constellationIndegree, constellationModel, teamKind, teamsOfKind,
 } from "./cohort-relations.js";
 import {
   contextRawScriptById as findContextRawScriptById,
   contextSourceById as findContextSourceById,
 } from "./context-vault-model.js";
 import { getCohortSurface, subscribeToCohortChanges, isSyncAvailable } from "./cohort-source.js";
+import { getCohortTimeline } from "./cohort-timeline.js";
 import { resolvePRForCurrentUser, clearForkCache } from "./gh-fork.js";
 import { enrichPeople } from "./gh-user.js";
 import { putLocalRecord, getRecord, getHealth, getManifest, getNodeLog } from "./sync-client.js";
@@ -50,6 +52,7 @@ import { getIdentity } from "./identity.js";
 import {
   askAgeLabel, askIsCurrent, askIsOpen, askStatus, askTopic, asksWithStatus,
   isAskMine, normalizeAskIdentity, resolveAskAuthor, resolveAskIdentityPerson,
+  askVerbVars, askVerbIconSvg,
 } from "./asks.js";
 // Membrane mode — 2026-05 redesign. Pressurized-membrane object that replaces
 // the 7-rail nav with a 4-blob constellation. Lives behind data-alch-mode
@@ -59,9 +62,14 @@ import { CALENDAR_TRANSCRIPT_MATCHES } from "../content/context/calendar-transcr
 import { renderIntel, wireIntel } from "./intel/intel.js";
 
 const ALCHEMY_LS_KEY  = "srwk:alchemy_mode";
+const CONST_MODE_LS_KEY = "srwk:const_mode";  // constellation sub-view: "map" | "ring" | "journey" | "stack"
+const CONST_SCOPE_LS_KEY = "srwk:const_scope"; // network scope: "projects" | "people"
+const CONST_LENS_LS_KEY = "srwk:const_lens";  // map lens: "all" | "relies" | "works" | "substrate"
+const CONST_INTEREST_LS_KEY = "srwk:const_interest"; // source-backed ecosystem view: cluster record_id | "all"
 const PROFILE_LS_KEY  = "srwk:profile_v1";
 const EVENTS_LS_KEY   = "srwk:cohort_events_v1";
 const DETAIL_LS_KEY   = "srwk:alchemy_detail_v1";
+const CONSTELLATION_TIMELINE_LS_KEY = "srwk:constellation_timeline_idx_v1";
 // `atlas` was here as an alchemy sub-mode but collides with the top-level
 // atlas tab (the swf-node wall-map). Renderer (renderAtlas / wireAtlas) is
 // kept in place so the view can be promoted to a top tab later under a
@@ -72,6 +80,8 @@ const DETAIL_LS_KEY   = "srwk:alchemy_detail_v1";
 // once that integration lands; rather than rip out the code and re-write it
 // from git history, the surfaces are simply unwired. See the "feed off"
 // section below this constant for the disabled hooks.
+// `collab` is hidden from the rail and represented as a Constellation
+// sub-view, but remains routeable as a saved-mode/external-jump alias.
 const ALCHEMY_MODES   = ["membrane", "shapes", "pulse", "constellation", "intel", "collab", "calendar", "profile", "onboarding", "program", "asks", "context"];
 const MEMBRANE_INTRO_LS_KEY = "srwk:membrane_seen_v1";
 
@@ -134,13 +144,23 @@ const state = {
   detailReturnMode: null,   // remembered so the back button knows where to land
   shapeControllers: [],     // active shader-canvas controllers — destroyed before each re-render so GL contexts don't leak
   cohort: null,        // { teams, clusters, people, program, asks, cohort_vocab } from cohort-source
+  cohortTimeline: null,         // generated timeline read model; snapshots carry public cohort surfaces
+  cohortTimelineLoading: false,
+  cohortTimelineError: "",
+  constellationTimelineIdx: null,  // selected snapshot index within cohortTimeline.snapshots
+  constellationShowDelta: false,
+  constellationDrawerRecordId: null,
   profile: null,       // local-only: { user, editor state, ... }
   programPage: null,   // active program-handbook page slug (overview | success | rules | schedule)
   atlasFocus: null,    // active tag in the atlas view (null = whole-graph mode)
   onboardingJustToggled: null,  // step key that was just marked/unmarked done; consumed by wireOnboarding to scroll-into-view the next step
   openAskComposer: false, // one-shot landing state when membrane sends someone to post
-  constellationMode: "clusters",  // "clusters" (shared cluster membership) | "dependencies" (team-asserted dependency edges)
-  constellationLayout: "wells",    // "wells" (cluster-grouped grid) | "circle" (single ring — the original view)
+  constellationMode: "map",   // top-level constellation view: "map" | "ring" | "journey" | "stack"
+  constellationScope: "projects", // network entity layer: projects/teams vs people-to-project membership
+  constellationLens: "all",   // map line lens: "all" | "relies" | "works" | "substrate" — changes which relationship claim is foregrounded
+  constInterest: "all",       // map ecosystem focus: "all" or a cluster record_id from cohort-data/clusters
+  constSelection: null,       // persistent constellation inspector selection: { type:"team"|"person", rid } | { type:"edge", from, to }
+  renderSeq: 0,               // monotonic render guard; stale delayed swaps must not overwrite the latest view
   calendar: {                     // calendar tab state — see renderCalendar()
     sub: "day",                   // "day" (typeset today agenda) | "week" (broadsheet grid) | "presence" (availability gantt)
     weekIdx: null,                // 0..9; resolved on first render via calendarCurrentWeekIdx()
@@ -178,12 +198,19 @@ export function mount(container) {
   if (state.mounted) return;
   state.container = container;
   state.canvas = document.getElementById("alchemy-canvas");
-  state.rail = container.querySelector(".alchemy-rail");
+  // The rail now lives in the persistent #primary-nav (2026-06), outside
+  // this view's container — find it globally rather than within `container`.
+  state.rail = document.querySelector(".alchemy-rail");
   if (!state.canvas || !state.rail) return;
 
   try {
     const saved = localStorage.getItem(ALCHEMY_LS_KEY);
-    if (saved && ALCHEMY_MODES.includes(saved)) state.mode = saved;
+    if (saved === "collab") {
+      state.mode = "constellation";
+      state.constellationMode = "collab";
+    } else if (saved && ALCHEMY_MODES.includes(saved)) {
+      state.mode = saved;
+    }
     // Migrations:
     if (saved === "specimens") { state.mode = "shapes"; localStorage.setItem(ALCHEMY_LS_KEY, "shapes"); }
     if (saved === "legend")    { state.mode = "shapes"; localStorage.setItem(ALCHEMY_LS_KEY, "shapes"); }
@@ -206,6 +233,11 @@ export function mount(container) {
     if (!membraneSeen) {
       state.mode = "membrane";
       localStorage.setItem(MEMBRANE_INTRO_LS_KEY, "1");
+    }
+    const timelineIdxRaw = localStorage.getItem(CONSTELLATION_TIMELINE_LS_KEY);
+    if (timelineIdxRaw != null && timelineIdxRaw !== "") {
+      const timelineIdx = Number(timelineIdxRaw);
+      if (Number.isFinite(timelineIdx)) state.constellationTimelineIdx = timelineIdx;
     }
   } catch {}
   // Detail page state — if a record was open at last reload, restore it
@@ -260,7 +292,7 @@ export function mount(container) {
   document.addEventListener("click", (e) => {
     if (!isMembraneShellOpen()) return;
     if (e.target.closest(".alchemy-rail")) return;
-    if (e.target.closest('#tab-bar .tab-btn[data-tab="alchemy"]')) return;
+    if (e.target.closest('.nav-cat[data-tab="alchemy"]')) return;
     setMembraneMenuOpen(false);
   });
   document.addEventListener("keydown", (e) => {
@@ -274,8 +306,11 @@ export function mount(container) {
     console.error("[alchemy] cohort load failed:", err);
     state.canvas.innerHTML = `<p class="alch-callout"><strong>cohort data unavailable</strong><br/>${escHtml(err.message || String(err))}</p>`;
   });
+  loadCohortTimeline().then(() => {
+    if (state.mounted && (state.mode === "constellation" || state.detailReturnMode === "constellation")) render();
+  }).catch(() => {});
   state.unsubscribe = subscribeToCohortChanges(() => {
-    loadCohort().then(render).catch(() => {});
+    loadCohort().then(() => render({ instant: true })).catch(() => {});
   });
   state.mounted = true;
 }
@@ -286,7 +321,56 @@ export function setActive(v) {
 
 export function notifyDataChanged() {
   if (!state.mounted) return;
-  loadCohort().then(render).catch(() => {});
+  loadCohort().then(() => render({ instant: true })).catch(() => {});
+}
+
+// ─── tab-system bridge ────────────────────────────────────────────────
+// The tab manager (tabs.js) drives the OS into a specific location and
+// reads back the current one. A "location" inside the OS tab is just a
+// mode plus an optional open record-detail id.
+export function getLocation() {
+  return { mode: state.mode, recordId: state.detailRecordId || null };
+}
+
+// Apply a location: set the mode (and optionally open a record detail),
+// persist it the same way the in-app handlers do, then repaint. Safe to
+// call before mount — it primes localStorage so the lazy mount lands here.
+export function applyLocation(loc = {}) {
+  const mode = ALCHEMY_MODES.includes(loc.mode) ? loc.mode : state.mode;
+  if (loc.recordId) {
+    state.mode = mode;
+    state.detailReturnMode = mode;
+    state.detailRecordId = String(loc.recordId);
+    try {
+      localStorage.setItem(ALCHEMY_LS_KEY, mode);
+      localStorage.setItem(DETAIL_LS_KEY, JSON.stringify({ recordId: state.detailRecordId, returnMode: mode }));
+    } catch {}
+  } else {
+    state.mode = mode;
+    state.detailRecordId = null;
+    state.detailReturnMode = null;
+    try {
+      localStorage.setItem(ALCHEMY_LS_KEY, mode);
+      localStorage.removeItem(DETAIL_LS_KEY);
+    } catch {}
+  }
+  if (state.mounted) {
+    syncRailSelection();
+    render({ instant: !!loc.instant });
+  }
+}
+
+// Human-readable title for a record id (team or person), for tab labels.
+export function getRecordTitle(recordId) {
+  if (!recordId) return null;
+  try {
+    const idx = buildCohortIndex(state.cohort);
+    const team = idx.teamById.get(String(recordId));
+    if (team) return team.name || String(recordId);
+    const person = idx.personById.get(String(recordId));
+    if (person) return person.name || String(recordId);
+  } catch {}
+  return String(recordId);
 }
 
 // Cross-module bridge — identity.js (and any future caller) can route
@@ -348,10 +432,65 @@ async function loadCohort() {
   }
 }
 
+async function loadCohortTimeline() {
+  if (state.cohortTimeline || state.cohortTimelineLoading) return;
+  state.cohortTimelineLoading = true;
+  try {
+    state.cohortTimeline = await getCohortTimeline();
+    state.cohortTimelineError = "";
+    ensureConstellationTimelineIdx();
+  } catch (err) {
+    console.warn("[alchemy] cohort timeline load failed:", err?.message || err);
+    state.cohortTimelineError = err?.message || String(err);
+  } finally {
+    state.cohortTimelineLoading = false;
+  }
+}
+
+function constellationSnapshots() {
+  return Array.isArray(state.cohortTimeline?.snapshots) ? state.cohortTimeline.snapshots : [];
+}
+
+function ensureConstellationTimelineIdx() {
+  const snapshots = constellationSnapshots();
+  if (!snapshots.length) {
+    state.constellationTimelineIdx = null;
+    return null;
+  }
+  let idx = Number.isFinite(state.constellationTimelineIdx)
+    ? Math.round(state.constellationTimelineIdx)
+    : snapshots.length - 1;
+  idx = Math.max(0, Math.min(snapshots.length - 1, idx));
+  state.constellationTimelineIdx = idx;
+  return idx;
+}
+
+function activeConstellationSnapshot() {
+  const snapshots = constellationSnapshots();
+  const idx = ensureConstellationTimelineIdx();
+  return idx == null ? null : snapshots[idx];
+}
+
+function activeConstellationCohort() {
+  return activeConstellationSnapshot()?.surface || state.cohort;
+}
+
+function previousConstellationSnapshot() {
+  const snapshots = constellationSnapshots();
+  const idx = ensureConstellationTimelineIdx();
+  if (idx == null || idx <= 0) return null;
+  return snapshots[idx - 1] || null;
+}
+
+function activeDetailCohort() {
+  return state.detailReturnMode === "constellation" ? activeConstellationCohort() : state.cohort;
+}
+
 function syncRailSelection() {
   if (!state.rail) return;
+  const activeMode = state.mode === "collab" ? "constellation" : state.mode;
   for (const btn of state.rail.querySelectorAll(".alchemy-rail-btn")) {
-    btn.setAttribute("aria-selected", btn.dataset.alchMode === state.mode ? "true" : "false");
+    btn.setAttribute("aria-selected", btn.dataset.alchMode === activeMode ? "true" : "false");
   }
 }
 
@@ -367,7 +506,7 @@ function syncMembraneMenuChrome() {
   if (!state.container) return;
   const open = isMembraneHome() && state.menuOpen;
   state.container.dataset.alchMenu = open ? "open" : "closed";
-  const tab = document.querySelector('#tab-bar .tab-btn[data-tab="alchemy"]');
+  const tab = document.querySelector('.nav-cat[data-tab="alchemy"]');
   if (tab) {
     tab.setAttribute("aria-expanded", open ? "true" : "false");
   }
@@ -390,19 +529,22 @@ export function closeMembraneMenu() {
   return true;
 }
 
-function render() {
+function render(opts = {}) {
   if (!state.canvas || !state.cohort) return;
+  // Monotonic render guard — a delayed cross-fade swap must not overwrite a
+  // newer view if the user switched tabs during the 220ms timeout.
+  const renderSeq = ++state.renderSeq;
   // Reflect current mode on the alchemy-view container so scoped CSS
   // (membrane.css especially) can target the right surface.
   if (state.container) {
     state.container.dataset.alchModeCurrent = state.mode;
+    // Mirror the open record-detail id so the tab system can observe
+    // navigation changes via a MutationObserver (no event plumbing).
+    state.container.dataset.alchDetail = state.detailRecordId || "";
     if (!isMembraneHome()) state.menuOpen = false;
     syncMembraneMenuChrome();
   }
-  // Cross-fade: leave → swap → enter. Total ~440ms.
   const canvas = state.canvas;
-  canvas.classList.remove("is-entering");
-  canvas.classList.add("is-leaving");
   // Tear down every active shape-shader controller before the innerHTML
   // rewrite — each one owns a WebGL2 context, and browsers cap us to
   // ~16. Leaving them alive across renders would silently exhaust the
@@ -414,54 +556,70 @@ function render() {
     try { state.membraneController.destroy(); } catch {}
     state.membraneController = null;
   }
+  // Instant path — no cross-fade. Used for tab switches + data refreshes so
+  // they feel immediate (browser-like) instead of a "reload".
+  if (opts.instant) {
+    canvas.classList.remove("is-leaving", "is-entering");
+    renderModeContent();
+    return;
+  }
+  // Animated cross-fade: leave → swap → enter (~440ms total).
+  canvas.classList.remove("is-entering");
+  canvas.classList.add("is-leaving");
   setTimeout(() => {
+    if (renderSeq !== state.renderSeq || canvas !== state.canvas) return;
     canvas.classList.add("is-entering");
     canvas.classList.remove("is-leaving");
-    // Detail page takes precedence over mode — opened by clicking a card,
-    // closed by the back button (which clears state.detailRecordId).
-    if (state.detailRecordId) {
-      renderDetail(state.detailRecordId);
-    } else if (state.mode === "membrane") renderMembrane();
-    else if (state.mode === "feed") renderFeed();
-    else if (state.mode === "shapes") renderShapes();
-    else if (state.mode === "pulse") renderPulse();
-    else if (state.mode === "constellation") renderConstellation();
-    else if (state.mode === "intel") renderIntel(state.canvas);
-    else if (state.mode === "collab") renderCollab();
-    else if (state.mode === "calendar") renderCalendar();
-    else if (state.mode === "profile") renderProfile();
-    else if (state.mode === "onboarding") renderOnboarding();
-    else if (state.mode === "program") renderProgram();
-    else if (state.mode === "asks") renderAsks();
-    else if (state.mode === "context") renderContextVault();
-    // atlas — sub-mode disabled to avoid collision with top-level atlas tab.
-    // Index cards for the staggered entrance.
-    const cards = canvas.querySelectorAll(".alch-card, .alch-legend-card, .alch-feed-item");
-    cards.forEach((c, i) => c.style.setProperty("--alch-i", String(i)));
+    renderModeContent();
     requestAnimationFrame(() => canvas.classList.remove("is-entering"));
-    // Wire up post-render interactions per mode.
-    if (!state.detailRecordId) {
-      if (state.mode === "shapes") wireShapeCardClicks();
-      if (state.mode === "feed") wireFeedInteractions();
-      if (state.mode === "profile") wireProfileForm();
-      // Kick a feed refresh on entry; the timer keeps it warm in background.
-      if (state.mode === "feed") refreshFeed({ source: "mode-enter" });
-      if (state.mode === "constellation") wireConstellationHover();
-      if (state.mode === "intel") wireIntel(state.canvas);
-      if (state.mode === "collab") wireCollab();
-      if (state.mode === "calendar") wireCalendar();
-      if (state.mode === "onboarding") wireOnboarding();
-      if (state.mode === "program") wireProgram();
-      if (state.mode === "asks") wireAsks();
-      if (state.mode === "context") wireContextVault();
-      // atlas wire skipped — see ALCHEMY_MODES comment.
-    }
-    // Mount shape shaders LAST — every <canvas data-shape-fam> emitted
-    // by the renderers above gets one WebGL2 context here. Controllers
-    // are tracked in state.shapeControllers so the next render can
-    // .destroy() them all in one shot.
-    mountAllShapes();
   }, 220);
+}
+
+// The actual content swap — mode dispatch + per-mode wiring + WebGL mount.
+// Split out of render() so it can run either inside the cross-fade or
+// synchronously (instant) for tab switches.
+function renderModeContent() {
+  const canvas = state.canvas;
+  if (!canvas) return;
+  // Detail page takes precedence over mode — opened by clicking a card,
+  // closed by the back button (which clears state.detailRecordId).
+  if (state.detailRecordId) {
+    renderDetail(state.detailRecordId);
+  } else if (state.mode === "membrane") renderMembrane();
+  else if (state.mode === "feed") renderFeed();
+  else if (state.mode === "shapes") renderShapes();
+  else if (state.mode === "pulse") renderPulse();
+  else if (state.mode === "constellation") renderConstellation();
+  else if (state.mode === "intel") renderIntel(state.canvas);
+  else if (state.mode === "collab") renderCollab();
+  else if (state.mode === "calendar") renderCalendar();
+  else if (state.mode === "profile") renderProfile();
+  else if (state.mode === "onboarding") renderOnboarding();
+  else if (state.mode === "program") renderProgram();
+  else if (state.mode === "asks") renderAsks();
+  else if (state.mode === "context") renderContextVault();
+  // Index cards for the staggered entrance.
+  const cards = canvas.querySelectorAll(".alch-card, .alch-legend-card, .alch-feed-item");
+  cards.forEach((c, i) => c.style.setProperty("--alch-i", String(i)));
+  // Wire up post-render interactions per mode.
+  if (!state.detailRecordId) {
+    if (state.mode === "shapes") wireShapeCardClicks();
+    if (state.mode === "feed") wireFeedInteractions();
+    if (state.mode === "profile") wireProfileForm();
+    // Kick a feed refresh on entry; the timer keeps it warm in background.
+    if (state.mode === "feed") refreshFeed({ source: "mode-enter" });
+    if (state.mode === "constellation") wireConstellationHover();
+    if (state.mode === "intel") wireIntel(state.canvas);
+    if (state.mode === "collab") wireCollab();
+    if (state.mode === "calendar") wireCalendar();
+    if (state.mode === "onboarding") wireOnboarding();
+    if (state.mode === "program") wireProgram();
+    if (state.mode === "asks") wireAsks();
+    if (state.mode === "context") wireContextVault();
+  }
+  // Mount shape shaders LAST — every <canvas data-shape-fam> emitted by the
+  // renderers above gets one WebGL2 context here.
+  mountAllShapes();
 }
 
 function destroyAllShapes() {
@@ -533,6 +691,222 @@ function todayGridEvents(cal) {
   } catch { return []; }
 }
 
+function membraneText(value) {
+  if (Array.isArray(value)) return value.map(membraneText).filter(Boolean).join("; ");
+  return String(value == null ? "" : value).replace(/\s+/g, " ").trim();
+}
+
+function membraneFirstText(...values) {
+  for (const value of values) {
+    if (Array.isArray(value)) {
+      const found = value.map(membraneText).find(Boolean);
+      if (found) return found;
+    } else {
+      const text = membraneText(value);
+      if (text) return text;
+    }
+  }
+  return "";
+}
+
+function membraneLowerFirst(text) {
+  const s = String(text || "");
+  return s ? s[0].toLowerCase() + s.slice(1) : s;
+}
+
+function membraneEntity(record, kind = "team") {
+  if (!record?.record_id) return null;
+  const label = record.name || record.display_name || record.handle || record.record_id;
+  return { id: record.record_id, kind, label };
+}
+
+function membraneMergeEntities(...groups) {
+  const merged = [];
+  const seen = new Set();
+  for (const group of groups) {
+    for (const entity of Array.isArray(group) ? group : []) {
+      if (!entity?.id) continue;
+      const key = `${entity.kind || ""}:${entity.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(entity);
+    }
+  }
+  return merged;
+}
+
+function membraneTrimSentence(text) {
+  return membraneText(text).replace(/[.;]+$/g, "");
+}
+
+function membranePolishPhrase(text) {
+  return membraneText(text)
+    .replace(/\blive fire\b/ig, "live-fire")
+    .replace(/\bnon technical\b/ig, "non-technical");
+}
+
+function buildMembraneSelfInference(record, team, connections = []) {
+  const name = record?.name || record?.display_name || record?.handle || record?.record_id || "this person";
+  const role = membraneFirstText(record?.role, record?.title, record?.role_class);
+  const usefulFor = membraneFirstText(
+    record?.go_to_them_for,
+    record?.offering,
+    record?.contribute_interests,
+    record?.working_style,
+    record?.recurring_themes,
+    record?.skills,
+    record?.skill_areas,
+  );
+  const usefulPhrase = usefulFor.replace(/[.;]+$/g, "");
+  const arena = membraneFirstText(
+    record?.recurring_themes,
+    record?.skill_areas,
+    record?.skills,
+    team?.focus,
+    record?.domain,
+    team?.domain,
+  ).replace(/[.;]+$/g, "");
+  const bio = membraneFirstText(record?.bio, record?.description, record?.about);
+  const evidence = `${role} ${usefulPhrase} ${arena} ${bio}`.toLowerCase();
+  const kind = record?.record_type === "team" || record?.kind === "team" ? "team" : "person";
+  const entities = [membraneEntity(record, kind), membraneEntity(team, "team")].filter(Boolean);
+  const arenaPhrase = /agent/i.test(bio) && /\bcrypto\b/i.test(`${arena} ${bio}`) ? "agent/crypto" : arena;
+  const usefulRead = membraneLowerFirst(membranePolishPhrase(usefulPhrase));
+
+  let text = "";
+  if (usefulPhrase && /feedback|framing|thought partner|non[-\s]?technical|product|react/i.test(evidence)) {
+    text = `Route ${name} rough ${arenaPhrase ? `${arenaPhrase} ` : ""}ideas when you need ${usefulRead}.`;
+  } else if (usefulPhrase && arena) {
+    text = `${name} is a routing fit for ${arena}: go to them for ${usefulRead}.`;
+  } else if (usefulPhrase) {
+    text = `${name}'s strongest routing signal is ${usefulRead}.`;
+  } else if (bio) {
+    const shortBio = bio.length > 170 ? `${bio.slice(0, 155).trim()}...` : bio.replace(/[.;]+$/g, "");
+    text = `${name}'s visible profile suggests this route: ${shortBio}.`;
+  } else if (connections.length) {
+    text = `${name}'s public surface is thin; the clearest signal is ${connections.length} declared cohort connection${connections.length === 1 ? "" : "s"}.`;
+  }
+
+  return text ? { text, entities } : null;
+}
+
+function membraneTimelineWorkSignals(record, team, timelineEvents = []) {
+  const recordId = record?.record_id || "";
+  const teamIds = new Set([team?.record_id, record?.team].filter(Boolean));
+  const handles = new Set([
+    record?.links?.github,
+    record?.gh_handle,
+    record?.handle,
+  ].map((v) => String(v || "").toLowerCase()).filter(Boolean));
+
+  return (Array.isArray(timelineEvents) ? timelineEvents : [])
+    .filter((event) => {
+      if (!event) return false;
+      const actor = String(event.actor || "").toLowerCase();
+      if (recordId && event.person_id === recordId) return true;
+      if (actor && handles.has(actor)) return true;
+      if (event.team_id && teamIds.has(event.team_id)) return true;
+      return false;
+    })
+    .sort((a, b) => (b.at_ms || 0) - (a.at_ms || 0))
+    .slice(0, 2)
+    .map((event) => {
+      const summary = membraneText(event.summary).replace(/[.;]+$/g, "");
+      const repo = membraneText(event.repo);
+      const text = summary ? `${summary}${repo ? ` on ${repo}` : ""}` : "";
+      const source = event.source === "transcript" ? "transcript" : "timeline";
+      return text ? { source, text, entities: [] } : null;
+    })
+    .filter(Boolean);
+}
+
+function buildMembraneWorkSummary(record, team, asks, askIdentity, timelineEvents = []) {
+  const signals = [];
+  const kind = record?.record_type === "team" || record?.kind === "team" ? "team" : "person";
+  const entities = [membraneEntity(record, kind), membraneEntity(team, "team")].filter(Boolean);
+  const push = (source, value, rowEntities = entities) => {
+    const text = membraneText(value);
+    if (text && !signals.some((row) => row.text.toLowerCase() === text.toLowerCase())) {
+      signals.push({ source, text, entities: rowEntities });
+    }
+  };
+
+  push("now", record?.now);
+  push("intent", record?.weekly_intention);
+  for (const signal of membraneTimelineWorkSignals(record, team, timelineEvents)) {
+    push(signal.source, signal.text, signal.entities);
+  }
+  if (team?.now) push("team", `${team.name || team.record_id}: ${team.now}`);
+  if (team?.weekly_goals) push("week", `${team.name || team.record_id}: ${membraneText(team.weekly_goals)}`);
+
+  const mine = (Array.isArray(asks) ? asks : [])
+    .filter((ask) => askIsOpen(ask) && isAskMine(ask, askIdentity))
+    .slice(0, 2);
+  for (const ask of mine) push("ask", askTopic(ask), []);
+
+  push("offers", record?.contribute_interests);
+
+  const now = signals.find((s) => s.source === "now")?.text?.replace(/[.;]+$/g, "");
+  const intent = signals.find((s) => s.source === "intent")?.text?.replace(/[.;]+$/g, "");
+  const timeline = signals.find((s) => s.source === "transcript" || s.source === "timeline")?.text?.replace(/[.;]+$/g, "");
+  const teamNow = signals.find((s) => s.source === "team")?.text?.replace(/[.;]+$/g, "");
+  const ask = signals.find((s) => s.source === "ask")?.text?.replace(/[.;]+$/g, "");
+  const offers = signals.find((s) => s.source === "offers")?.text?.replace(/[.;]+$/g, "");
+
+  let text = "";
+  if (now && timeline) {
+    text = `${now}; latest visible activity: ${membraneLowerFirst(timeline)}.`;
+  } else if (timeline && intent) {
+    text = `Latest visible activity: ${timeline}; stated next move: ${intent}.`;
+  } else if (timeline) {
+    text = `Latest visible activity: ${timeline}.`;
+  } else if (now && intent) {
+    text = `${now}, with ${intent} as the stated next move.`;
+  } else if (now) {
+    text = `${now}.`;
+  } else if (intent) {
+    text = `Said they would do this next: ${intent}.`;
+  } else if (teamNow) {
+    text = `${teamNow}.`;
+  } else if (ask) {
+    text = `Current visible ask: ${ask}.`;
+  } else if (offers) {
+    text = `No fresh work signal; closest current contribution signal is ${membraneLowerFirst(offers)}.`;
+  }
+
+  const sourceDetail = signals.slice(0, 4).map((s) => s.source).join(" + ");
+  return text ? { text, source: "generated", sourceDetail, entities, signals: signals.slice(0, 5) } : null;
+}
+
+function buildMembraneSelfRead(record, team, connections, asks, askIdentity, timelineEvents = []) {
+  const inference = buildMembraneSelfInference(record, team, connections);
+  const work = buildMembraneWorkSummary(record, team, asks, askIdentity, timelineEvents);
+  const entities = membraneMergeEntities(inference?.entities, work?.entities);
+  const hasTimelineSignal = Array.isArray(work?.signals)
+    && work.signals.some((signal) => signal?.source === "timeline" || signal?.source === "transcript");
+  const needsCalibration = connections.length === 0 && !hasTimelineSignal;
+  let text = "";
+
+  if (inference?.text && work?.text) {
+    text = `${membraneTrimSentence(inference.text)}. Current work signal: ${membraneTrimSentence(work.text)}.`;
+  } else if (inference?.text) {
+    text = inference.text;
+  } else if (work?.text) {
+    text = work.text;
+  } else {
+    return null;
+  }
+
+  const sourceDetail = ["routing", work?.sourceDetail].filter(Boolean).join(" + ");
+  return {
+    text: needsCalibration ? `Needs more signal to calibrate. Current read: ${text}` : text,
+    source: "generated",
+    sourceDetail,
+    entities,
+    tone: needsCalibration ? "uncalibrated" : "normal",
+  };
+}
+
 // Cross-blob data feed. Read the cohort surface and shape it into per-blob
 // stat dictionaries that the panels can render. Re-runs on every cohort
 // refresh via subscribeToCohortChanges → render() chain.
@@ -541,6 +915,11 @@ function computeMembraneData() {
   const cohortIndex = buildCohortIndex(c);
   const teams = cohortIndex.teams;
   const people = cohortIndex.people;
+  // #226 relationship graph — declarations dropped during the mega-merge; restored
+  // at function scope so both the if(myTeam) block and allEdges below can see them.
+  const teamById = cohortIndex.teamById;
+  const graphEdges = constellationDependencyEdges(teams, teamById, c.dependencies || []);
+  const allEdges = graphEdges.length;
   const events = Array.isArray(c.events) ? c.events : [];
   const asks = asksWithStatus(c.asks);
 
@@ -627,17 +1006,14 @@ function computeMembraneData() {
   eventsToday.sort((a, b) =>
     (a.time ? 1 : 0) - (b.time ? 1 : 0) || String(a.time).localeCompare(String(b.time)));
 
-  // Edge count: count unique team↔team dependencies the current user's team
-  // participates in. Fallback: total cohort-level edges.
-  const allEdges = teams.reduce((n, t) => n + (Array.isArray(t.dependencies) ? t.dependencies.length : 0), 0);
-
-  // Connections — mirror the constellation view's edges into a flat list
-  // the self panel can render. Includes teammates (same team), members
-  // of teams my team depends on, and people in shared synergy clusters.
+  // Connections — mirror the constellation view's relationship edges into a
+  // flat list the self panel can render. Includes teammates (same team),
+  // members of teams linked to mine, and people in shared synergy clusters.
   const connections = [];
+  let myTeam = null;
   if (myRecord) {
     const myTeamId = myRecord.team || (myRecord.kind === 'team' ? myRecord.record_id : null);
-    const myTeam = myTeamId ? cohortIndex.teamById.get(myTeamId) : null;
+    myTeam = myTeamId ? cohortIndex.teamById.get(myTeamId) : null;
     const seen = new Set();
     const add = (person, edgeType, team) => {
       if (!person || person.record_id === myRecord.record_id) return;
@@ -655,18 +1031,21 @@ function computeMembraneData() {
     if (myTeam) {
       // Teammates
       for (const p of cohortIndex.primaryPeopleByTeam.get(myTeam.record_id) || []) add(p, 'teammate', myTeam);
-      // Dependency-team members
-      const depIds = Array.isArray(myTeam.dependencies) ? myTeam.dependencies : [];
-      for (const depId of depIds) {
-        const depTeam = cohortIndex.teamById.get(depId);
+      // Relationship target members.
+      for (const edge of graphEdges.filter(e => e.from === myTeam.record_id)) {
+        const depTeam = cohortIndex.teamById.get(edge.to);
         if (!depTeam) continue;
-        for (const p of cohortIndex.primaryPeopleByTeam.get(depId) || []) add(p, 'depends on', depTeam);
+        for (const p of cohortIndex.primaryPeopleByTeam.get(edge.to) || []) {
+          add(p, edge.relation_label || "declared link", depTeam);
+        }
       }
-      // Reverse-dependency: teams that depend on mine
-      for (const t of teams) {
-        if (!Array.isArray(t.dependencies)) continue;
-        if (!t.dependencies.includes(myTeam.record_id)) continue;
-        for (const p of cohortIndex.primaryPeopleByTeam.get(t.record_id) || []) add(p, 'depended by', t);
+      // Incoming relationship members.
+      for (const e of graphEdges) {
+        if (e.to !== myTeam.record_id) continue;
+        const t = teamById.get(e.from);
+        if (!t) continue;
+        const label = e.relation === "depends_on" ? "depends on us" : "links to us";
+        for (const p of cohortIndex.primaryPeopleByTeam.get(t.record_id) || []) add(p, label, t);
       }
     }
     // Cluster overlap — people in same synergy cluster as my team
@@ -683,12 +1062,19 @@ function computeMembraneData() {
     }
   }
 
+  const edgeCountValue = connections.length || allEdges;
+  const edgeCountSource = connections.length ? "resolved self graph" : "cohort dependency graph";
+  const selfRead = myRecord
+    ? buildMembraneSelfRead(myRecord, myTeam, connections, asks, askIdentity, state.events)
+    : null;
+
   // Shape the profile object the panel will render. Prefer the full
   // cohort record (rich fields), fall back to the identity claim (just
   // name + kind + record_id), fall back to editor-state user.
   const ghHandle = myRecord?.links?.github || myRecord?.gh_handle || myRecord?.handle || editorHandle || '';
-  const avatarUrl = ghHandle
-    ? `https://github.com/${encodeURIComponent(ghHandle)}.png?size=256`
+  const ghAccount = normalizeGithubAccount(ghHandle);
+  const avatarUrl = ghAccount
+    ? `https://github.com/${encodeURIComponent(ghAccount)}.png?size=256`
     : null;
 
   const profileForPanel = myRecord ? {
@@ -697,7 +1083,7 @@ function computeMembraneData() {
     team: myRecord.team || (myRecord.kind === 'team' ? myRecord.record_id : ''),
     role: myRecord.role || myRecord.title || '',
     role_class: myRecord.role_class,
-    handle: ghHandle,
+    handle: ghAccount || ghHandle,
     bio: myRecord.bio || myRecord.description || myRecord.about || '',
     kind: myRecord.kind || (cohortIndex.teamById.has(myRecord.record_id) ? 'team' : 'person'),
     links: myRecord.links || {},
@@ -715,7 +1101,7 @@ function computeMembraneData() {
 
   return {
     self: {
-      edgeCount: String(connections.length || allEdges),
+      edgeCount: String(edgeCountValue),
       // Reliable claim signal — ONLY a formal identity claim counts, never
       // the editor-handle fallback (that mis-flagged the github editor user
       // as "claimed" and stranded them in an empty field). The membrane uses
@@ -723,6 +1109,8 @@ function computeMembraneData() {
       claimed: !!(identity && identity.record_id),
       profile: profileForPanel,
       connections,
+      edgeCountSource,
+      read: selfRead,
     },
     cohort: {
       peerCount: String(people.length),
@@ -750,16 +1138,31 @@ function computeMembraneData() {
 // Public hook used by membrane/index.js.
 window.__srwkAlchemyJump = function alchemyJumpFromMembrane(mode, opts) {
   if (!ALCHEMY_MODES.includes(mode)) return;
-  state.mode = mode;
+  state.mode = mode === "collab" ? "constellation" : mode;
   // Optional: land on a specific constellation sub-view (clusters /
-  // dependencies / journey). Used by the cohort panel's view cards.
+  // dependencies / journey / collab). Used by the cohort panel's view cards.
+  if (mode === "collab") {
+    state.constellationMode = "collab";
+  }
   if (mode === "constellation" && opts && opts.constellationMode) {
-    state.constellationMode = opts.constellationMode;
+    const m = opts.constellationMode;
+    if (m === "circle" || m === "ring") {
+      state.constellationMode = "ring";
+    } else if (m === "clusters" || m === "wells" || m === "dependencies" || m === "source") {
+      state.constellationMode = "map";
+      state.constellationLens = constNormalizeConstellationLens(m);
+    } else {
+      state.constellationMode = m;   // "journey" | "map" | "ring" | "stack"
+    }
+    try {
+      localStorage.setItem(CONST_MODE_LS_KEY, state.constellationMode);
+      localStorage.setItem(CONST_LENS_LS_KEY, state.constellationLens);
+    } catch {}
   }
   if (mode === "asks" && opts && opts.openComposer) {
     state.openAskComposer = true;
   }
-  try { localStorage.setItem(ALCHEMY_LS_KEY, mode); } catch {}
+  try { localStorage.setItem(ALCHEMY_LS_KEY, mode === "collab" ? "collab" : state.mode); } catch {}
   syncRailSelection();
   render();
 };
@@ -924,6 +1327,7 @@ function renderShapes() {
       const nextChipSet = next === "people" ? PERSON_ROLE_CHIPS : TEAM_MEMBERSHIP_CHIPS;
       state.shapesMembershipFilter = nextChipSet[0].id;
       renderShapes();
+      wireShapeCardClicks();   // renderShapes() rebinds chips, not card→openDetail; re-wire after filter switch
     });
   }
   // Wire the membership chips.
@@ -933,6 +1337,7 @@ function renderShapes() {
       if (next === state.shapesMembershipFilter) return;
       state.shapesMembershipFilter = next;
       renderShapes();
+      wireShapeCardClicks();   // re-wire cards after membership-filter switch (see note above)
     });
   }
   // Wire the dossier export button.
@@ -1028,8 +1433,10 @@ const JOURNEY_BOTTLENECKS = [
 ];
 const JOURNEY_COMPANY_TYPES = ["B2B", "Consumer", "Infra", "Marketplace", "Protocol", "AI", "Other"];
 const JOURNEY_CONFIDENCE = ["Low", "Medium", "High"];
-// 10-color palette keyed by primary_bottleneck (CSS classes ac-jdot-b0..b9).
-// Lives in styles.css; this array keeps the index↔bottleneck mapping in one place.
+// Fine per-bottleneck palette — still used by the PMF detail card's single
+// bottleneck chip (one chip, so the 10-hue precision is fine there). The
+// SCATTER collapses these to 4 families (JOURNEY_BOTTLENECK_FAMILIES) for a
+// holdable glance read.
 const JOURNEY_BOTTLENECK_COLORS = [
   "#c44025", // ICP Clarity     — oxide red
   "#d98a3d", // Pain Intensity  — amber
@@ -1042,6 +1449,25 @@ const JOURNEY_BOTTLENECK_COLORS = [
   "#9a6b5a", // Regulatory      — clay
   "#8a8f99", // Team            — slate
 ];
+// The scatter colors dots by bottleneck FAMILY (4 holdable hues), not by the
+// 10 fine-grained bottlenecks — 10 hues is past what an eye can hold at a
+// glance. The fine bottleneck still drives isolation + the tooltip + the
+// detail card; only the dot color collapses. (CSS: ac-jfam-0..3.)
+const JOURNEY_BOTTLENECK_FAMILIES = [
+  { label: "market",  members: ["ICP Clarity", "Pain Intensity"] },
+  { label: "product", members: ["Solution Quality", "Technical Risk"] },
+  { label: "growth",  members: ["GTM", "Retention", "Business Model"] },
+  { label: "company", members: ["Fundraising", "Regulatory", "Team"] },
+];
+const JOURNEY_BOTTLENECK_FAMILY_IDX = (() => {
+  const m = {};
+  JOURNEY_BOTTLENECK_FAMILIES.forEach((f, i) => f.members.forEach(b => { m[b] = i; }));
+  return m;
+})();
+function journeyFamilyIdx(bottleneck) {
+  const i = JOURNEY_BOTTLENECK_FAMILY_IDX[bottleneck];
+  return i === undefined ? 0 : i;
+}
 const JOURNEY_DEFAULTS = {
   stage: 1, evidence_quality: 1, market_upside: 3,
   primary_bottleneck: "ICP Clarity", confidence: "Low",
@@ -1074,6 +1500,19 @@ function journeyFor(rec) {
     evidence_notes: typeof j.evidence_notes === "string" ? j.evidence_notes : "",
     next_milestone: typeof j.next_milestone === "string" ? j.next_milestone : "",
   };
+}
+
+// True when a record carries ANY self-entered journey signal (vs. sitting at
+// the idea·vibes default). Drives the scatter's hollow "default" dots + the
+// "N of M assessed" honesty count, so unedited teams can't masquerade as a
+// real bottom-left cluster — the same data-honesty rule applied on the collab
+// board (don't advertise a placement you haven't actually collected).
+function journeyAssessed(rec) {
+  const j = rec && typeof rec.journey === "object" && rec.journey;
+  if (!j) return false;
+  return ["stage", "evidence_quality", "market_upside", "primary_bottleneck",
+          "confidence", "icp", "problem", "solution", "evidence_notes", "next_milestone"]
+    .some(k => j[k] !== undefined && j[k] !== null && j[k] !== "");
 }
 
 // Stable signed jitter in [-1,1] from (record_id, salt) so the many
@@ -1169,8 +1608,2598 @@ function journeyDetailSection(rec) {
     </div>`;
 }
 
+// ─── shared constellation chrome ─────────────────────────────────────
+// Three top-level questions:
+// map = what world is this in and what does this line claim?
+//   map layouts: wells = ecosystem placement; ring = who bridges worlds.
+// journey = where is the product-market-fit journey?
+// stack = where does the project enter the product/market stack?
+const CONST_VIEWS = [
+  { mode: "map",     glyph: "◉", label: "relationship map", hint: "project wells and evidence-backed connections" },
+  { mode: "journey", glyph: "⌁", label: "pmf evidence", hint: "coverage of explicit product-market-fit reads" },
+  { mode: "stack",   glyph: "▦", label: "product layer", hint: "where projects enter the product stack" },
+];
+function constellationNav(active) {
+  const activeTop = active === "ring" ? "map" : active;
+  return `
+    <nav class="alch-const-modes" role="tablist" aria-label="constellation view">
+      ${CONST_VIEWS.map(v => `
+        <button class="alch-const-mode-btn" data-const-mode="${v.mode}" aria-selected="${activeTop === v.mode}" aria-label="${escAttr(`${v.label}: ${v.hint}`)}" title="${escAttr(v.hint)}" type="button">
+          <span class="acm-glyph" aria-hidden="true">${v.glyph}</span><span class="acm-label">${v.label}</span>
+        </button>`).join("")}
+    </nav>`;
+}
+
+const CONST_MAP_LAYOUTS = [
+  { mode: "map", label: "wells", hint: "ecosystem placement" },
+  { mode: "ring", label: "circle", hint: "all relationship lines" },
+];
+const CONST_NETWORK_SCOPES = [
+  { scope: "projects", label: "projects", hint: "team/project relationship records" },
+  { scope: "people", label: "people", hint: "person-to-person relationship context" },
+];
+function constNormalizeNetworkScope(raw) {
+  return String(raw || "").toLowerCase() === "people" ? "people" : "projects";
+}
+function constellationNetworkScopeRow(active) {
+  const scope = constNormalizeNetworkScope(active);
+  return `
+    <div class="ac-network-scope-row" role="group" aria-label="network entity layer">
+      <span>Graph</span>
+      ${CONST_NETWORK_SCOPES.map(v => {
+        return `
+          <button class="ac-network-scope-btn" data-const-network-scope="${v.scope}" aria-selected="${scope === v.scope}" aria-label="${escAttr(`${v.label}, ${v.hint}`)}" type="button">
+            <strong>${escHtml(v.label)}</strong>
+          </button>`;
+      }).join("")}
+    </div>`;
+}
+function constellationMapLayoutRow(active) {
+  const activeLayout = active === "ring" ? "ring" : "map";
+  return `
+    <div class="ac-map-layout-row" role="group" aria-label="map layout">
+      <span>layout</span>
+      ${CONST_MAP_LAYOUTS.map(v => `
+        <button class="ac-map-layout-btn" data-const-map-layout="${v.mode}" aria-selected="${activeLayout === v.mode}" aria-label="${escAttr(`${v.label} layout, ${v.hint}`)}" type="button">${escHtml(v.label)}</button>
+      `).join("")}
+    </div>`;
+}
+
+// Map line lenses. Each re-weights the SAME map (control-as-claim): it changes
+// which relationship claim is being inspected, never the geometry. Ecosystems
+// are controlled directly by clicking the wells, not by another text row.
+const CONST_LENSES = [
+  { lens: "all",       label: "all",    meaning: "every declared line" },
+  { lens: "relies",    label: "relies", meaning: "needs or unblocks another team" },
+  { lens: "works",     label: "works",  meaning: "collaboration, pairing, or complement" },
+  { lens: "substrate", label: "shared", meaning: "same primitive or ecosystem context" },
+];
+function constNormalizeConstellationLens(raw) {
+  const lens = String(raw || "").toLowerCase();
+  if (lens === "dependencies" || lens === "clusters" || lens === "source") return "all";
+  if (lens === "all" || lens === "relies" || lens === "works" || lens === "substrate") return lens;
+  return "all";
+}
+function constellationLensMetric(lens, metrics = {}) {
+  if (lens === "all") return metrics.edges;
+  if (lens === "relies") return metrics.reliance;
+  if (lens === "works") return metrics.collaboration;
+  if (lens === "substrate") return metrics.ecosystem;
+  return "";
+}
+function constellationLensAria(lens, label, metric) {
+  if (lens === "relies") return metric === 0 ? `${label}, no reliance records yet` : `${label}, reliance or unblock lines`;
+  if (lens === "works") return `${label}, collaboration lines`;
+  if (lens === "substrate") return `${label}, shared substrate lines`;
+  return `${label}, declared lines`;
+}
+function constellationLensRow(active, metrics = {}) {
+  const chipCopy = {
+    all: { label: "all" },
+    relies: { label: "relies" },
+    works: { label: "works" },
+    substrate: { label: "shared" },
+  };
+  return `
+    <div class="ac-lens-row" role="group" aria-label="map lens">
+      <span>lines</span>
+      ${CONST_LENSES.map(l => {
+        const metric = constellationLensMetric(l.lens, metrics);
+        const aria = constellationLensAria(l.lens, l.label, metric);
+        const spec = chipCopy[l.lens] || { label: l.label };
+        return `<button class="ac-lens-btn${metric === 0 ? " is-empty" : ""}" data-const-lens="${l.lens}" aria-selected="${active === l.lens}" aria-label="${escAttr(aria)}" type="button"><span>${escHtml(spec.label)}</span></button>`;
+      }).join("")}
+    </div>`;
+}
+// Truncate long cluster/well labels at rest. Full text stays available via
+// an SVG <title> tooltip. Keeps compact labels from colliding with nodes.
+function constTruncLabel(label) {
+  const s = String(label || "");
+  if (s.length <= 20) return { text: s, title: "" };
+  return { text: s.slice(0, 18).trimEnd() + "…", title: s };
+}
+
+function constWellLabelLines(label) {
+  const raw = constText(label);
+  if (!raw) return [];
+  const slashParts = raw.split(/\s*\/\s*/).map(part => part.trim()).filter(Boolean);
+  const parts = slashParts.length > 1 ? slashParts : raw.split(/\s+/);
+  const lines = [];
+  let current = "";
+  for (const part of parts) {
+    const next = current ? `${current} ${part}` : part;
+    if (next.length <= 18 || !current) current = next;
+    else {
+      lines.push(current);
+      current = part;
+    }
+    if (lines.length === 1 && current.length > 18) break;
+  }
+  if (current) lines.push(current);
+  const compact = lines.slice(0, 2).map(line => line.length > 20 ? `${line.slice(0, 18).trimEnd()}...` : line);
+  if (compact.length === 2 && compact.join(" ").length < raw.length - 2) {
+    compact[1] = compact[1].length > 17 ? `${compact[1].slice(0, 15).trimEnd()}...` : compact[1];
+  }
+  return compact;
+}
+
+function constWellLabelSvg(w, y, cls = "ac-well-label") {
+  const lines = constWellLabelLines(w.label);
+  if (!lines.length) return "";
+  const x = Number(w.cx || 0).toFixed(1);
+  const title = constText(w.label);
+  const count = w?.members?.length || w?.count || 0;
+  const countLabel = `${count} team${count === 1 ? "" : "s"}`;
+  const titleLabel = cls === "ac-well-label" && count > 0 ? `${title} · ${countLabel}` : title;
+  return `
+    <text class="${cls}" x="${x}" y="${Number(y).toFixed(1)}" text-anchor="middle">
+      <title>${escHtml(titleLabel)}</title>
+      ${lines.map((line, idx) => `<tspan class="ac-well-name-line" x="${x}" dy="${idx === 0 ? "0" : "10.5"}">${escHtml(line)}</tspan>`).join("")}
+    </text>`;
+}
+
+function constNodeLabelLines(team, viewMode) {
+  const raw = constText(team?.name || team?.record_id);
+  if (!raw) return [];
+  if (viewMode === "ring") {
+    const max = 16;
+    return [raw.length <= max ? raw : `${raw.slice(0, max - 1).trimEnd()}…`];
+  }
+  const max = 13;
+  if (raw.length <= max) return [raw];
+  const parts = raw.split(/[\s/_-]+/).map(part => part.trim()).filter(Boolean);
+  if (parts.length <= 1) return [`${raw.slice(0, max - 1).trimEnd()}…`];
+  const lineMax = 11;
+  const sep = raw.includes("-") && !/\s/.test(raw) ? "-" : " ";
+  const lines = [];
+  let current = "";
+  let used = 0;
+  for (const partRaw of parts) {
+    const part = partRaw.length <= lineMax ? partRaw : `${partRaw.slice(0, lineMax - 1).trimEnd()}…`;
+    const next = current ? `${current}${sep}${part}` : part;
+    if (next.length <= lineMax || !current) {
+      current = next;
+      used++;
+      continue;
+    }
+    lines.push(current);
+    current = part;
+    used++;
+    if (lines.length >= 2) break;
+  }
+  if (current && lines.length < 2) lines.push(current);
+  if (used < parts.length && lines.length) {
+    const last = lines[lines.length - 1];
+    lines[lines.length - 1] = last.length >= lineMax
+      ? `${last.slice(0, lineMax - 1).trimEnd()}…`
+      : `${last}…`;
+  }
+  return lines.slice(0, 2);
+}
+
+function constNodeLabelSvg(lines, x, y, anchor, title) {
+  const safeLines = (Array.isArray(lines) ? lines : []).filter(Boolean);
+  if (!safeLines.length) return "";
+  const xStr = Number(x).toFixed(1);
+  const multi = safeLines.length > 1;
+  const y0 = multi && Number(y) >= 0 ? Number(y) - 4 : Number(y);
+  const lineMarkup = safeLines.map((line, idx) =>
+    idx === 0
+      ? escHtml(line)
+      : `<tspan x="${xStr}" dy="9.4">${escHtml(line)}</tspan>`
+  ).join("");
+  return `<text class="ac-node-label" x="${xStr}" y="${y0.toFixed(1)}" text-anchor="${anchor}"><title>${escHtml(title)}</title>${lineMarkup}</text>`;
+}
+
+const CONST_WELL_ACCENTS = [
+  { strong: "#C0492E", soft: "rgba(192,73,46,0.13)", faint: "rgba(192,73,46,0.045)" },
+  { strong: "#D9913D", soft: "rgba(217,145,61,0.13)", faint: "rgba(217,145,61,0.045)" },
+  { strong: "#9A5BA6", soft: "rgba(154,91,166,0.13)", faint: "rgba(154,91,166,0.045)" },
+  { strong: "#3F9B8E", soft: "rgba(63,155,142,0.13)", faint: "rgba(63,155,142,0.045)" },
+  { strong: "#D6BD86", soft: "rgba(214,189,134,0.13)", faint: "rgba(214,189,134,0.045)" },
+  { strong: "#7A8EA8", soft: "rgba(122,142,168,0.13)", faint: "rgba(122,142,168,0.045)" },
+];
+function constWellAccentTokens(id, idx = 0) {
+  const text = constText(id);
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) hash = ((hash * 31) + text.charCodeAt(i)) >>> 0;
+  return CONST_WELL_ACCENTS[(hash + idx) % CONST_WELL_ACCENTS.length];
+}
+function constWellAccentStyle(tokens) {
+  if (!tokens) return "";
+  return `--well-accent:${tokens.strong};--well-accent-soft:${tokens.soft};--well-accent-faint:${tokens.faint};`;
+}
+
+function constText(val) {
+  if (val == null) return "";
+  if (Array.isArray(val)) return val.map(constText).filter(Boolean).join(" · ");
+  if (val instanceof Date) return Number.isNaN(val.getTime()) ? "" : val.toISOString().slice(0, 10);
+  if (typeof val === "object") return "";
+  return String(val).replace(/\s+/g, " ").trim();
+}
+function constList(val) {
+  if (Array.isArray(val)) return val.map(constText).filter(Boolean);
+  const s = constText(val);
+  if (!s) return [];
+  return s.split(/\s*[,;]\s*|\n+/).map(x => x.trim()).filter(Boolean);
+}
+function constShortText(val, max = 150) {
+  const s = constText(val);
+  if (!s || s.length <= max) return s;
+  return s.slice(0, max - 1).trimEnd() + "…";
+}
+function constTeamCountText(count) {
+  const n = Number(count) || 0;
+  return `${n} team${n === 1 ? "" : "s"}`;
+}
+function constPersonDisplayName(person) {
+  return constText(person?.name || person?.display_name || person?.handle || person?.record_id || "person");
+}
+function constPersonInitials(person) {
+  const name = constPersonDisplayName(person);
+  const parts = name.split(/\s+/).filter(Boolean);
+  if (!parts.length) return "?";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return `${parts[0][0] || ""}${parts[parts.length - 1][0] || ""}`.toUpperCase();
+}
+function constPersonRoleLabel(person) {
+  const roleClass = constText(person?.role_class).replace(/-/g, " ");
+  return constText(person?.role) || roleClass || "participant";
+}
+function constPeopleNetworkModel(people = [], teams = [], W = 1120, H = 620) {
+  const teamById = new Map((Array.isArray(teams) ? teams : []).filter(t => t?.record_id).map(t => [t.record_id, t]));
+  const peopleList = (Array.isArray(people) ? people : []).filter(p => p?.record_id);
+  const peopleById = new Map(peopleList.map(p => [p.record_id, p]));
+  const peopleForTeam = new Map();
+  const teamIdsWithPeople = new Set();
+  for (const person of peopleList) {
+    const teamId = teamById.has(person.team) ? person.team : "_unattached_people";
+    if (!peopleForTeam.has(teamId)) peopleForTeam.set(teamId, []);
+    peopleForTeam.get(teamId).push(person);
+    teamIdsWithPeople.add(teamId);
+  }
+  const connectedTeams = [...teamIdsWithPeople]
+    .filter(id => id !== "_unattached_people")
+    .map(id => teamById.get(id))
+    .sort((a, b) =>
+      constDomainClass(a.domain).localeCompare(constDomainClass(b.domain))
+      || String(a.name || a.record_id).localeCompare(String(b.name || b.record_id)));
+  const unattached = peopleForTeam.get("_unattached_people") || [];
+  const groupDefs = [
+    ...connectedTeams.map(team => ({
+      id: team.record_id,
+      label: team.name || team.record_id,
+      team,
+      kind: "team",
+      people: (peopleForTeam.get(team.record_id) || []).sort((a, b) => constPersonDisplayName(a).localeCompare(constPersonDisplayName(b))),
+    })),
+  ];
+  if (unattached.length) {
+    groupDefs.push({
+      id: "_unattached_people",
+      label: "not attached / visiting",
+      team: null,
+      kind: "unattached",
+      people: unattached.slice().sort((a, b) => constPersonDisplayName(a).localeCompare(constPersonDisplayName(b))),
+    });
+  }
+  const N = Math.max(1, groupDefs.length);
+  const cols = Math.max(1, Math.min(N, Math.round(Math.sqrt(N * (W / H)))));
+  const rowsN = Math.ceil(N / cols);
+  const cellW = W / cols;
+  const cellH = H / rowsN;
+  const groups = [];
+  const groupById = new Map();
+  const personPositions = new Map();
+  groupDefs.forEach((group, idx) => {
+    const col = idx % cols;
+    const row = Math.floor(idx / cols);
+    const rowCount = row === rowsN - 1 ? (N - row * cols) : cols;
+    const rowPad = (cols - rowCount) * cellW / 2;
+    const cx = rowPad + col * cellW + cellW / 2;
+    const cy = row * cellH + cellH / 2;
+    const count = group.people.length;
+    const r = Math.max(54, Math.min(cellW, cellH) * 0.40);
+    const placed = { ...group, cx, cy, r, count };
+    groups.push(placed);
+    groupById.set(group.id, placed);
+    group.people.forEach((person, personIdx) => {
+      const personR = person.role_class === "coordinator" ? 7.4 : 6.4;
+      let x = cx;
+      let y = cy;
+      let angle = null;
+      if (count > 1) {
+        const ring = count > 9 && personIdx >= 9 ? 1 : 0;
+        const ringIdx = ring ? personIdx - 9 : personIdx;
+        const ringCount = ring ? Math.max(1, count - 9) : Math.min(count, 9);
+        angle = -Math.PI / 2 + (ringIdx / ringCount) * Math.PI * 2;
+        const spread = ring ? 0.62 : (count > 5 ? 0.48 : 0.36);
+        x = cx + Math.cos(angle) * r * spread;
+        y = cy + Math.sin(angle) * r * spread;
+      }
+      personPositions.set(person.record_id, {
+        person,
+        x,
+        y,
+        r: personR,
+        angle,
+        groupId: group.id,
+        teamId: group.team?.record_id || "",
+      });
+    });
+  });
+
+  const edgeByPair = new Map();
+  const teamIdForPerson = person => teamById.has(person?.team) ? person.team : "";
+  const secondarySet = person => new Set(Array.isArray(person?.secondary_teams) ? person.secondary_teams.filter(id => teamById.has(id)) : []);
+  const personTextTokens = person => constTalkTokens([
+    person?.role,
+    person?.role_class,
+    person?.now,
+    person?.weekly_intention,
+    person?.working_style,
+    person?.contribute_interests,
+    person?.go_to_them_for,
+    person?.recurring_themes,
+    person?.skills,
+    person?.skill_areas,
+  ]);
+  const tokenByPerson = new Map(peopleList.map(person => [person.record_id, personTextTokens(person)]));
+  const addEdge = (a, b, kind, score, reason, shared = []) => {
+    if (!a?.record_id || !b?.record_id || a.record_id === b.record_id) return;
+    const [pa, pb] = [a.record_id, b.record_id].sort();
+    const key = `${pa}|${pb}`;
+    const existing = edgeByPair.get(key);
+    const row = {
+      id: key,
+      a: pa,
+      b: pb,
+      kind,
+      score,
+      reason,
+      shared: shared.slice(0, 4),
+      sourceKinds: [kind],
+    };
+    if (!existing || score > existing.score) {
+      if (existing) row.sourceKinds = [...new Set([...existing.sourceKinds, kind])];
+      edgeByPair.set(key, row);
+    } else {
+      existing.sourceKinds = [...new Set([...existing.sourceKinds, kind])];
+      if (shared.length && existing.shared.length < 4) existing.shared = [...new Set([...existing.shared, ...shared])].slice(0, 4);
+    }
+  };
+  for (const group of groups) {
+    const members = group.people || [];
+    for (let i = 0; i < members.length; i++) {
+      for (let j = i + 1; j < members.length; j++) {
+        addEdge(members[i], members[j], "same-team", 92, `same primary project: ${group.label}`);
+      }
+    }
+  }
+  for (let i = 0; i < peopleList.length; i++) {
+    for (let j = i + 1; j < peopleList.length; j++) {
+      const a = peopleList[i];
+      const b = peopleList[j];
+      const aTeam = teamIdForPerson(a);
+      const bTeam = teamIdForPerson(b);
+      const aSecondary = secondarySet(a);
+      const bSecondary = secondarySet(b);
+      if ((aTeam && bSecondary.has(aTeam)) || (bTeam && aSecondary.has(bTeam)) || [...aSecondary].some(id => bSecondary.has(id))) {
+        addEdge(a, b, "secondary-overlap", 78, "secondary project overlap");
+      }
+      const aPair = constList(a.pair_with).map(x => x.toLowerCase());
+      const bPair = constList(b.pair_with).map(x => x.toLowerCase());
+      const aName = constPersonDisplayName(a).toLowerCase();
+      const bName = constPersonDisplayName(b).toLowerCase();
+      if (aPair.includes(b.record_id.toLowerCase()) || aPair.includes(bName) || bPair.includes(a.record_id.toLowerCase()) || bPair.includes(aName)) {
+        addEdge(a, b, "pair-with", 86, "pair_with profile field");
+      }
+      const at = tokenByPerson.get(a.record_id) || new Set();
+      const bt = tokenByPerson.get(b.record_id) || new Set();
+      const shared = [...at].filter(token => bt.has(token)).slice(0, 6);
+      if (shared.length >= 2) {
+        addEdge(a, b, "shared-context", 30 + shared.length * 6, `shared declared context: ${shared.slice(0, 3).join(", ")}`, shared);
+      }
+    }
+  }
+  const edges = [...edgeByPair.values()]
+    .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id))
+    .slice(0, 120)
+    .map(edge => {
+      const ap = personPositions.get(edge.a);
+      const bp = personPositions.get(edge.b);
+      return { ...edge, x1: ap?.x || 0, y1: ap?.y || 0, x2: bp?.x || 0, y2: bp?.y || 0 };
+    })
+    .filter(edge => personPositions.has(edge.a) && personPositions.has(edge.b));
+  return {
+    groups,
+    groupById,
+    peopleById,
+    people: peopleList,
+    personPositions,
+    edges,
+    attached: peopleList.filter(p => p?.team && teamById.has(p.team)).length,
+    unattached: peopleList.filter(p => !p?.team || !teamById.has(p.team)).length,
+  };
+}
+
+// Transcript cues are public source data carried on the cohort surface. They do
+// not create graph edges; they only add inspectable context beside selected
+// teams, lines, and ecosystems.
+function constSourceTranscriptCues() {
+  const cues = Array.isArray(state.cohort?.constellation_cues) ? state.cohort.constellation_cues : [];
+  return cues
+    .filter(cue => cue && typeof cue === "object")
+    .map(cue => ({
+      teams: Array.isArray(cue.teams) ? cue.teams.map(id => constText(id).toLowerCase()).filter(Boolean) : [],
+      clusters: Array.isArray(cue.clusters) ? cue.clusters.map(id => constText(id).toLowerCase()).filter(Boolean) : [],
+      label: constText(cue.label),
+      source: constText(cue.source),
+      excerpt: constText(cue.excerpt),
+    }))
+    .filter(cue => cue.label && cue.excerpt);
+}
+
+function constTranscriptCueKey(cue) {
+  return `${cue?.source || ""}|${cue?.label || ""}|${cue?.excerpt || ""}`;
+}
+
+function constSourceCueHref(source) {
+  const raw = constText(source);
+  if (!raw) return "";
+  if (/^https?:\/\//i.test(raw)) return raw;
+  const match = raw.match(/^(.*?)(?::(\d+))?$/);
+  const pathPart = (match?.[1] || raw).replace(/\\/g, "/").replace(/^\/+/, "");
+  if (!pathPart) return "";
+  const line = match?.[2] || "";
+  const repoPath = pathPart.startsWith("cohort-data/") ? pathPart : `cohort-data/${pathPart}`;
+  const encoded = repoPath.split("/").map(part => encodeURIComponent(part)).join("/");
+  return `https://github.com/dmarzzz/shape-rotator-os/blob/main/${encoded}${line ? `#L${line}` : ""}`;
+}
+
+function constTranscriptCueSourceHtml(cue) {
+  const source = cue?.source || "raw transcript";
+  const href = constSourceCueHref(source);
+  return href
+    ? `<a class="ac-source-link" href="${escAttr(href)}" data-external>${escHtml(source)}</a>`
+    : `<small>${escHtml(source)}</small>`;
+}
+
+function constTranscriptCuesForTeam(team, limit = 3) {
+  const rid = constText(team?.record_id).toLowerCase();
+  const name = constText(team?.name).toLowerCase();
+  if (!rid && !name) return [];
+  return constSourceTranscriptCues()
+    .filter(cue => (cue.teams || []).some(id => id === rid || id === name))
+    .slice(0, limit);
+}
+
+function constTranscriptCuesForEdge(edge, ctx, limit = 3) {
+  const from = constText(edge?.from).toLowerCase();
+  const to = constText(edge?.to).toLowerCase();
+  if (!from || !to) return [];
+  const fromTeam = ctx?.teamById?.get(edge.from);
+  const toTeam = ctx?.teamById?.get(edge.to);
+  const direct = constSourceTranscriptCues().filter(cue => {
+    const teams = new Set(cue.teams || []);
+    return teams.has(from) && teams.has(to);
+  });
+  const loose = [
+    ...constTranscriptCuesForTeam(fromTeam, limit),
+    ...constTranscriptCuesForTeam(toTeam, limit),
+  ];
+  const seen = new Set();
+  const out = [];
+  for (const cue of [...direct, ...loose]) {
+    const key = constTranscriptCueKey(cue);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(cue);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function constTranscriptCuesForInterest(interest, limit = 3) {
+  if (!interest?.active) return [];
+  const coreIds = interest.coreIds || new Set();
+  const clusterId = constText(interest.id).toLowerCase();
+  return constSourceTranscriptCues()
+    .filter(cue =>
+      (cue.clusters || []).includes(clusterId)
+      || (cue.teams || []).some(id => coreIds.has(id)))
+    .slice(0, limit);
+}
+
+function constTranscriptCueListHtml(cues, title = "transcript cues") {
+  const list = (Array.isArray(cues) ? cues : []).filter(Boolean);
+  if (!list.length) return "";
+  return `
+    <section class="ac-inspector-section is-transcript-cues">
+      <h4>${escHtml(title)}</h4>
+      <div class="ac-transcript-cues">
+        ${list.map(cue => `
+          <article class="ac-transcript-cue">
+            <span>${escHtml(cue.label || "transcript")}</span>
+            <p>${escHtml(constShortText(cue.excerpt, 180))}</p>
+            ${constTranscriptCueSourceHtml(cue)}
+          </article>`).join("")}
+      </div>
+    </section>`;
+}
+
+function constTranscriptCueDetailsHtml(cues, title = "source cues") {
+  const list = (Array.isArray(cues) ? cues : []).filter(Boolean);
+  if (!list.length) return "";
+  return `
+    <details class="ac-inspector-details is-transcript-cues">
+      <summary>${escHtml(title)} <span>${escHtml(String(list.length))}</span></summary>
+      <div class="ac-inspector-details-body ac-transcript-cues">
+        ${list.map(cue => `
+          <article class="ac-transcript-cue">
+            <span>${escHtml(cue.label || "transcript")}</span>
+            <p>${escHtml(constShortText(cue.excerpt, 150))}</p>
+            ${constTranscriptCueSourceHtml(cue)}
+          </article>`).join("")}
+      </div>
+    </details>`;
+}
+
+function constRelationshipMeaning(edge) {
+  if (!edge?.normalized) {
+    return {
+      key: "unknown",
+      label: "profile mention",
+      note: "A team profile mentions this connection, but no relationship record explains the claim yet.",
+    };
+  }
+  if (edge.relation === "depends_on") {
+    return {
+      key: "reliance",
+      label: "relies on",
+      note: "The source is saying the target is something it needs, builds on, or must coordinate around.",
+    };
+  }
+  if (edge.relation === "unblocks") {
+    return {
+      key: "reliance",
+      label: "unblocks",
+      note: "The source can remove a blocker for the target. This is operational reliance, not just topical similarity.",
+    };
+  }
+  if (edge.relation === "pairs_with") {
+    return {
+      key: "collaboration",
+      label: "working together",
+      note: "The teams are positioned as collaborators or pairing candidates; the line does not imply a hard dependency.",
+    };
+  }
+  if (edge.relation === "complements") {
+    return {
+      key: "collaboration",
+      label: "complement",
+      note: "The products or capabilities reinforce each other; useful adjacency, but not necessarily blocking reliance.",
+    };
+  }
+  if (edge.relation === "shares_substrate") {
+    return {
+      key: "ecosystem",
+      label: "shared substrate",
+      note: "The teams share an underlying technical stack, market genre, or operating context. This is ecosystem context, not proof they rely on each other.",
+    };
+  }
+  return {
+    key: "unknown",
+    label: "mapped source link",
+    note: "This relation is declared, but its meaning category is not yet mapped in the constellation grammar.",
+  };
+}
+
+function constRelationshipDirection(edge, fromName, toName) {
+  const a = fromName || edge?.from || "source";
+  const b = toName || edge?.to || "target";
+  if (!edge?.normalized) return `${a} mentions ${b} in its team profile.`;
+  if (edge.relation === "depends_on") return `${a} relies on ${b}.`;
+  if (edge.relation === "unblocks") return `${a} can unblock ${b}.`;
+  if (edge.relation === "pairs_with") return `${a} is a pairing or collaboration candidate with ${b}.`;
+  if (edge.relation === "complements") return `${a} complements ${b}.`;
+  if (edge.relation === "shares_substrate") return `${a} and ${b} share substrate or ecosystem context.`;
+  return `${a} is linked to ${b} by a declared relationship record.`;
+}
+
+function constRelationshipVerb(edge) {
+  if (!edge?.normalized) return "is connected to";
+  const labels = {
+    depends_on: "depends on",
+    unblocks: "can unblock",
+    pairs_with: "could work with",
+    complements: "complements",
+    shares_substrate: "shares infrastructure with",
+    declared: "is connected to",
+  };
+  return labels[edge.relation] || (edge.relation_label || "is connected to");
+}
+
+function constRelationshipStatus(edge) {
+  if (!edge?.normalized) {
+    return {
+      label: "needs confirmation",
+      note: "This is a profile mention. Treat it as a lead to verify, not a relationship record.",
+    };
+  }
+  const labels = {
+    exploring: "candidate relationship",
+    active: "active now",
+    blocked: "blocked",
+    resolved: "already handled",
+    declared: "declared",
+    unknown: "status unknown",
+  };
+  const notes = {
+    exploring: "The record says this is being explored; treat it as a lead, not a confirmed operating dependency.",
+    active: "The record says this is currently active.",
+    blocked: "The record says progress is blocked on this relationship.",
+    resolved: "The record says this relationship has already been resolved.",
+    declared: "The record declares a connection but does not add operating status.",
+    unknown: "The record does not declare status.",
+  };
+  return {
+    label: labels[edge.status] || edge.status_label || "status unknown",
+    note: notes[edge.status] || "The status is read from the relationship record.",
+  };
+}
+
+function constRelationshipSource(edge) {
+  if (!edge?.normalized) {
+    const field = edge?.source_kind === "team_dependencies" ? "team.dependencies" : "profile field";
+    return {
+      label: "profile mention",
+      note: `Created from ${field}; no relationship record backs this line yet.`,
+    };
+  }
+  return {
+    label: edge.record_id || edge.id || "relationship record",
+    note: "A relationship record supplies the type, status, source strength, and evidence for this line.",
+  };
+}
+
+function constRelationshipConfidenceLabel(edge) {
+  if (!edge?.normalized) return "profile mention; no relationship record";
+  const confidence = constText(edge.confidence).toLowerCase();
+  if (confidence === "high") return "relationship record: strong";
+  if (confidence === "medium") return "relationship record: source-backed";
+  if (confidence === "low") return "relationship record: candidate";
+  if (edge.status === "exploring") return "relationship record: exploring";
+  return constText(edge.confidence_label) || "relationship record";
+}
+
+function constRelationshipOneLine(edge, fromName, toName) {
+  const a = fromName || edge?.from || "source";
+  const b = toName || edge?.to || "target";
+  if (!edge?.normalized) return `${a} mentions ${b} in its team profile.`;
+  return `${a} ${constRelationshipVerb(edge)} ${b}.`;
+}
+
+const SUCCESS_DIMENSION_LABELS = {
+  productization: "product",
+  research_lineage: "research",
+  collaborative: "collab",
+};
+function constSuccessDimensions(team) {
+  return constList(team?.success_dimensions).map(s => SUCCESS_DIMENSION_LABELS[s] || s.replace(/_/g, " "));
+}
+
+function constClusterId(cluster) {
+  return constText(cluster?.record_id || cluster?.name);
+}
+
+function constClusterLabel(cluster) {
+  return constText(cluster?.label || cluster?.name || cluster?.record_id || "ecosystem");
+}
+
+function constTeamSkillList(team) {
+  return (Array.isArray(team?.skill_areas) ? team.skill_areas : []).map(constText).filter(Boolean);
+}
+
+function constClusterMembershipByTeam(clusters = []) {
+  const out = new Map();
+  for (const cl of (Array.isArray(clusters) ? clusters : [])) {
+    const id = constClusterId(cl);
+    if (!id) continue;
+    for (const rid of (Array.isArray(cl?.teams) ? cl.teams : [])) {
+      const key = constText(rid);
+      if (!key) continue;
+      if (!out.has(key)) out.set(key, []);
+      out.get(key).push({ id, label: constClusterLabel(cl), cluster: cl });
+    }
+  }
+  return out;
+}
+
+function constInterestContext(teams = [], clusters = [], edges = [], activeId = "all") {
+  const list = Array.isArray(teams) ? teams : [];
+  const clusterList = Array.isArray(clusters) ? clusters : [];
+  const id = constText(activeId) || "all";
+  const teamById = new Map(list.filter(t => t?.record_id).map(t => [t.record_id, t]));
+  let cluster = id === "all" ? null : clusterList.find(cl => constClusterId(cl) === id);
+  if (!cluster && id === "_other") {
+    const clusteredIds = new Set();
+    for (const cl of clusterList) for (const rid of (Array.isArray(cl.teams) ? cl.teams : [])) clusteredIds.add(rid);
+    const teamsMissingCluster = list.filter(team => team?.record_id && !clusteredIds.has(team.record_id)).map(team => team.record_id);
+    if (teamsMissingCluster.length) {
+      cluster = {
+        record_id: "_other",
+        name: "unclustered",
+        label: "unclustered",
+        teams: teamsMissingCluster,
+        description: "Teams not listed in an ecosystem cluster record. They stay visible as their own source grouping.",
+      };
+    }
+  }
+  if (!cluster) {
+    return {
+      active: false,
+      id: "all",
+      cluster: null,
+      coreIds: new Set(),
+      neighborIds: new Set(),
+      relatedClusterIds: new Set(),
+      coreTeams: [],
+      neighborTeams: [],
+      topSkills: [],
+      relatedClusters: [],
+    };
+  }
+
+  const coreTeams = (Array.isArray(cluster.teams) ? cluster.teams : []).map(rid => teamById.get(rid)).filter(Boolean);
+  const coreIds = new Set(coreTeams.map(t => t.record_id));
+  const skillCounts = new Map();
+  for (const team of coreTeams) {
+    for (const skill of constTeamSkillList(team)) {
+      skillCounts.set(skill, (skillCounts.get(skill) || 0) + 1);
+    }
+  }
+  const topSkills = [...skillCounts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 5)
+    .map(([skill, count]) => ({ skill, count }));
+  const topSkillSet = new Set(topSkills.map(item => item.skill));
+
+  const neighborIds = new Set();
+  for (const edge of (Array.isArray(edges) ? edges : [])) {
+    if (coreIds.has(edge.from) && teamById.has(edge.to) && !coreIds.has(edge.to)) neighborIds.add(edge.to);
+    if (coreIds.has(edge.to) && teamById.has(edge.from) && !coreIds.has(edge.from)) neighborIds.add(edge.from);
+  }
+  if (topSkillSet.size) {
+    for (const team of list) {
+      if (!team?.record_id || coreIds.has(team.record_id)) continue;
+      if (constTeamSkillList(team).some(skill => topSkillSet.has(skill))) neighborIds.add(team.record_id);
+    }
+  }
+  const neighborTeams = [...neighborIds]
+    .map(rid => teamById.get(rid))
+    .filter(Boolean)
+    .sort((a, b) => String(a.name || a.record_id).localeCompare(String(b.name || b.record_id)));
+
+  const relatedClusters = [];
+  const relatedClusterIds = new Set();
+  for (const rel of clusterList) {
+    const relId = constClusterId(rel);
+    if (!relId || relId === id) continue;
+    const members = new Set(Array.isArray(rel.teams) ? rel.teams : []);
+    const coreOverlap = [...members].filter(rid => coreIds.has(rid)).length;
+    const neighborOverlap = [...members].filter(rid => neighborIds.has(rid)).length;
+    if (!coreOverlap && !neighborOverlap) continue;
+    relatedClusterIds.add(relId);
+    relatedClusters.push({
+      id: relId,
+      label: constClusterLabel(rel),
+      description: constText(rel.description),
+      coreOverlap,
+      neighborOverlap,
+    });
+  }
+  relatedClusters.sort((a, b) =>
+    b.coreOverlap - a.coreOverlap
+    || b.neighborOverlap - a.neighborOverlap
+    || a.label.localeCompare(b.label));
+
+  return {
+    active: true,
+    id,
+    cluster,
+    coreIds,
+    neighborIds,
+    relatedClusterIds,
+    coreTeams,
+    neighborTeams,
+    topSkills,
+    relatedClusters,
+  };
+}
+
+function constInterestOwnsEdge(edge, interest) {
+  if (!interest?.active) return true;
+  return interest.coreIds.has(edge?.from) || interest.coreIds.has(edge?.to);
+}
+
+function constInterestTouchesEdge(edge, interest) {
+  if (!interest?.active) return true;
+  return constInterestOwnsEdge(edge, interest)
+    || interest.neighborIds.has(edge?.from)
+    || interest.neighborIds.has(edge?.to);
+}
+
+function constInterestSummaryHtml(ctx) {
+  const interest = ctx?.interest;
+  if (!interest?.active) return "";
+  const core = interest.coreTeams.slice(0, 4);
+  const neighbors = interest.neighborTeams.slice(0, 4);
+  const focusEdges = (ctx?.edges || []).filter(edge => constInterestOwnsEdge(edge, interest));
+  const skillChips = interest.topSkills.length
+    ? `<div class="ac-view-chips">${interest.topSkills.map(item => `<span>${escHtml(item.skill)}<em>${escHtml(String(item.count))}</em></span>`).join("")}</div>`
+    : `<p class="ac-inspector-empty">no shared source tags declared by the core teams.</p>`;
+  const clusterChips = interest.relatedClusters.length
+    ? `<div class="ac-view-clusters">${interest.relatedClusters.slice(0, 3).map(cl => `
+        <button type="button" class="ac-view-chip" data-const-interest="${escAttr(cl.id)}">
+          <span>${escHtml(cl.label)}</span>
+          <small>${escHtml(`${cl.coreOverlap} core · ${cl.neighborOverlap} adjacent`)}</small>
+        </button>`).join("")}</div>`
+    : `<p class="ac-inspector-empty">no overlapping cluster wells from the current source data.</p>`;
+  const teamPills = (items, total, note) => {
+    const pills = items.map(t => `<button type="button" class="ac-team-pill" data-const-team="${escAttr(t.record_id)}">${escHtml(t.name || t.record_id)}</button>`).join("");
+    const more = total > items.length ? `<span class="ac-team-pill is-more">+${escHtml(String(total - items.length))}</span>` : "";
+    return pills || more ? `<div class="ac-team-pill-row">${pills}${more}</div>` : `<p class="ac-inspector-empty">${escHtml(note)}</p>`;
+  };
+  return `
+    <section class="ac-inspector-section is-ecosystem-view">
+      <h4>current ecosystem view</h4>
+      <div class="ac-view-summary">
+        <strong>${escHtml(constClusterLabel(interest.cluster))}</strong>
+        <p>${escHtml(constShortText(interest.cluster.description, 135) || "no cluster description declared.")}</p>
+      </div>
+      <div class="ac-inspector-pills is-summary">
+        <span><strong>${escHtml(String(interest.coreTeams.length))}</strong> core teams</span>
+        <span><strong>${escHtml(String(interest.neighborTeams.length))}</strong> adjacent</span>
+        <span><strong>${escHtml(String(focusEdges.length))}</strong> direct lines</span>
+      </div>
+      <div class="ac-inspector-actions">
+        <button type="button" class="ac-mini-action" data-const-interest="all">show whole map</button>
+      </div>
+      <div class="ac-ecosystem-compact">
+        <div>
+          <span>core teams</span>
+          ${teamPills(core, interest.coreTeams.length, "no member teams found.")}
+        </div>
+        <div>
+          <span>adjacent teams</span>
+          ${teamPills(neighbors, interest.neighborTeams.length, "no adjacent teams from declared connections or shared source tags.")}
+        </div>
+        <div>
+          <span>shared source tags</span>
+          ${skillChips}
+        </div>
+        <div>
+          <span>related ecosystems</span>
+          ${clusterChips}
+        </div>
+      </div>
+    </section>
+    ${constTranscriptCueDetailsHtml(constTranscriptCuesForInterest(interest), "source cues")}`;
+}
+
+function constellationTeamNavOrder(ctx) {
+  const teams = (ctx?.teams || []).filter(team => team?.record_id);
+  const interest = ctx?.interest;
+  const groupRank = (team) => {
+    if (!interest?.active) return 1;
+    if (interest.coreIds.has(team.record_id)) return 0;
+    if (interest.neighborIds.has(team.record_id)) return 1;
+    return 2;
+  };
+  return teams.slice().sort((a, b) =>
+    groupRank(a) - groupRank(b)
+    || String(a.name || a.record_id).localeCompare(String(b.name || b.record_id)));
+}
+
+function constConstellationCoverage(teams = [], edges = []) {
+  const list = Array.isArray(teams) ? teams : [];
+  const edgeList = Array.isArray(edges) ? edges : [];
+  const typedEdges = edgeList.filter(e => e.normalized).length;
+  const meaningMissing = Math.max(0, edgeList.length - typedEdges);
+  const assessed = list.filter(journeyAssessed).length;
+  const activeContext = list.filter(t => constText(t.now) || constText(t.weekly_goals)).length;
+  const proofy = list.filter(t =>
+    constText(t.traction)
+    || constList(t.prior_shipping).length
+    || constList(t.paper_basis).length).length;
+  return { teams: list.length, edges: edgeList.length, typedEdges, meaningMissing, assessed, activeContext, proofy };
+}
+
+function constMapDistributionRows(wells = [], accentById = new Map()) {
+  const total = wells.reduce((sum, well) => sum + (well.members?.length || well.count || 0), 0) || 1;
+  return wells
+    .map((well, idx) => {
+      const count = well.members?.length || well.count || 0;
+      const id = well.id;
+      const accent = accentById.get(id) || constWellAccentTokens(id, idx);
+      return {
+        id,
+        label: well.label || id,
+        count,
+        pct: count / total,
+        accent,
+      };
+    })
+    .filter(row => row.count > 0)
+    .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+}
+
+function constMapDistributionHtml(wells = [], accentById = new Map(), activeId = "all") {
+  const rows = constMapDistributionRows(wells, accentById);
+  if (!rows.length) return "";
+  const r = 24;
+  const c = 2 * Math.PI * r;
+  let offset = 0;
+  const segments = rows.map(row => {
+    const len = Math.max(0.5, row.pct * c);
+    const dash = `${len.toFixed(2)} ${(c - len).toFixed(2)}`;
+    const dashOffset = (-offset).toFixed(2);
+    offset += len;
+    const selected = activeId === row.id;
+    const label = `${row.label}: ${row.count} teams, ${Math.round(row.pct * 100)} percent`;
+    return `<circle class="ac-donut-segment${selected ? " is-selected" : ""}" data-const-interest="${escAttr(row.id)}" cx="32" cy="32" r="${r}" fill="none" stroke="${escAttr(row.accent.strong)}" stroke-width="${selected ? 8 : 6}" stroke-dasharray="${dash}" stroke-dashoffset="${dashOffset}" transform="rotate(-90 32 32)" role="button" tabindex="0" aria-pressed="${selected ? "true" : "false"}" aria-label="${escAttr(label)}"><title>${escHtml(row.label)} · ${escHtml(String(row.count))} teams · ${escHtml(String(Math.round(row.pct * 100)))}%</title></circle>`;
+  }).join("");
+  const visibleRows = rows.slice(0, 3);
+  const activeRow = activeId !== "all" ? rows.find(row => row.id === activeId) : null;
+  if (activeRow && !visibleRows.some(row => row.id === activeRow.id)) {
+    if (visibleRows.length >= 3) visibleRows[visibleRows.length - 1] = activeRow;
+    else visibleRows.push(activeRow);
+  }
+  const visibleIds = new Set(visibleRows.map(row => row.id));
+  const hiddenRows = rows.filter(row => !visibleIds.has(row.id));
+  const hiddenTeams = hiddenRows.reduce((sum, row) => sum + row.count, 0);
+  const topRows = visibleRows.map(row => `
+    <button type="button" class="ac-dist-row${activeId === row.id ? " is-selected" : ""}" data-const-interest="${escAttr(row.id)}" style="${escAttr(constWellAccentStyle(row.accent))}">
+      <span>${escHtml(row.label)}</span>
+      <em>${escHtml(String(row.count))} · ${escHtml(String(Math.round(row.pct * 100)))}%</em>
+    </button>`).join("");
+  const moreRow = hiddenRows.length
+    ? `<div class="ac-dist-more">+${escHtml(String(hiddenRows.length))} more worlds · ${escHtml(String(hiddenTeams))} teams</div>`
+    : "";
+  return `
+    <div class="ac-distribution-card" aria-label="ecosystem composition">
+      <button type="button" class="ac-dist-reset" data-const-interest="all">ecosystem mix</button>
+      <div class="ac-dist-body">
+        <svg class="ac-cluster-donut" viewBox="0 0 64 64" role="group" aria-label="ecosystem composition">
+          <circle cx="32" cy="32" r="${r}" fill="none" stroke="rgba(226,207,162,0.08)" stroke-width="6"/>
+          ${segments}
+          <text x="32" y="29" text-anchor="middle">${escHtml(String(wells.reduce((sum, well) => sum + (well.members?.length || well.count || 0), 0)))}</text>
+          <text x="32" y="40" text-anchor="middle">teams</text>
+        </svg>
+        <div class="ac-dist-rows">${topRows}${moreRow}</div>
+      </div>
+    </div>`;
+}
+
+function constRelationshipBreakdown(edges = []) {
+  const out = {
+    total: 0,
+    typed: 0,
+    missing: 0,
+    reliance: 0,
+    collaboration: 0,
+    ecosystem: 0,
+    unknown: 0,
+    active: 0,
+    blocked: 0,
+    exploring: 0,
+  };
+  for (const edge of (Array.isArray(edges) ? edges : [])) {
+    out.total++;
+    if (edge?.normalized) out.typed++;
+    else out.missing++;
+    const meaning = constRelationshipMeaning(edge).key;
+    if (Object.prototype.hasOwnProperty.call(out, meaning)) out[meaning]++;
+    else out.unknown++;
+    if (edge?.status === "active") out.active++;
+    if (edge?.status === "blocked") out.blocked++;
+    if (edge?.status === "exploring") out.exploring++;
+  }
+  return out;
+}
+
+function constLensSummaryHtml(ctx) {
+  const lens = ctx?.lens || "all";
+  if (lens === "all") return "";
+  if (lens === "relies" || lens === "works" || lens === "substrate") {
+    const spec = {
+      relies: {
+        title: "relies on",
+        label: "dependency / unblock",
+      },
+      works: {
+        title: "works with",
+        label: "collaboration",
+      },
+      substrate: {
+        title: "shared substrate",
+        label: "substrate",
+      },
+    }[lens];
+    return `
+      <section class="ac-inspector-section is-lens-summary">
+        <h4>${escHtml(spec.title)}</h4>
+        <div class="ac-view-summary">
+          <strong>${escHtml(spec.label)}</strong>
+          <p>This lens narrows the map to one kind of relationship. Solid lines have a relationship record; dotted lines come from project profile mentions and need confirmation.</p>
+        </div>
+        <div class="ac-lens-key">
+          <span><i class="is-reliance"></i>solid: relationship record</span>
+          <span><i class="is-ecosystem"></i>dotted: profile mention</span>
+        </div>
+      </section>`;
+  }
+  return "";
+}
+
+function constellationInspectorContext(teams, edges, people = []) {
+  const all = teams || [];
+  const peopleList = Array.isArray(people) ? people : [];
+  const teamById = new Map(all.map(t => [t.record_id, t]));
+  const personById = new Map(peopleList.filter(p => p?.record_id).map(p => [p.record_id, p]));
+  const peopleByTeam = new Map(all.map(t => [t.record_id, []]));
+  for (const person of peopleList) {
+    if (!person?.team || !peopleByTeam.has(person.team)) continue;
+    peopleByTeam.get(person.team).push(person);
+  }
+  const inBy = new Map(all.map(t => [t.record_id, []]));
+  const outBy = new Map(all.map(t => [t.record_id, []]));
+  const edgeByPair = new Map();
+  for (const e of (edges || [])) {
+    if (!teamById.has(e.from) || !teamById.has(e.to)) continue;
+    if (!outBy.has(e.from)) outBy.set(e.from, []);
+    if (!inBy.has(e.to)) inBy.set(e.to, []);
+    outBy.get(e.from).push(e);
+    inBy.get(e.to).push(e);
+    edgeByPair.set(dependencyPairKey(e.from, e.to), e);
+  }
+  return { teams: all, people: peopleList, edges: edges || [], teamById, personById, peopleByTeam, inBy, outBy, edgeByPair };
+}
+
+function constellationCurrentInspectorContext() {
+  const teams = state.cohort?.teams || [];
+  const people = state.cohort?.people || [];
+  const clusters = state.cohort?.clusters || [];
+  const teamById = new Map(teams.filter(t => t?.record_id).map(t => [t.record_id, t]));
+  const edges = constellationDependencyEdges(teams, teamById, state.cohort?.dependencies || [])
+    .filter(e => teamById.has(e.from) && teamById.has(e.to));
+  const model = constellationModel(teams, clusters, state.cohort?.dependencies || []);
+  const ctx = constellationInspectorContext(teams, edges, people);
+  const rawMode = state.constellationMode === "wells" ? "map" : state.constellationMode;
+  const mode = rawMode === "ring" || rawMode === "journey" || rawMode === "stack" ? rawMode : "map";
+  const base = { ...ctx, clusters, mode, scope: constNormalizeNetworkScope(state.constellationScope), distributionWells: model.wellsDef, lens: mode === "ring" ? "all" : constNormalizeConstellationLens(state.constellationLens), interest: constInterestContext(teams, clusters, edges, state.constInterest) };
+  return mode === "stack" ? { ...base, stackModel: constProductStackModel(teams, base) } : base;
+}
+
+function constEvidenceItems(team, ctx) {
+  const j = journeyFor(team);
+  const assessed = journeyAssessed(team);
+  const paperCount = constList(team.paper_basis).length;
+  const shipCount = constList(team.prior_shipping).length;
+  const inbound = ctx?.inBy?.get(team.record_id)?.length || 0;
+  const outbound = ctx?.outBy?.get(team.record_id)?.length || 0;
+  const operating = [team.now, team.weekly_goals, team.graduation_target, team.monthly_milestones].filter(constText).length;
+  const marketBits = [team.traction, assessed && j.icp, assessed && j.evidence_notes, assessed && j.next_milestone].filter(Boolean).length;
+  const profileNote = "profile only; no stronger proof signal";
+  return [
+    { key: "market", label: "customer traction", value: Math.min(5, marketBits), note: team.traction || (assessed ? j.evidence_notes : "") || profileNote },
+    { key: "build", label: "product shipped", value: Math.min(5, shipCount + (team.hackathon_note ? 1 : 0)), note: shipCount ? `${shipCount} public shipping signals` : (team.hackathon_note || profileNote) },
+    { key: "research", label: "research basis", value: Math.min(5, paperCount), note: paperCount ? `${paperCount} paper / mechanism references` : profileNote },
+    { key: "cohort", label: "cohort pull", value: Math.min(5, inbound + outbound), note: `${inbound} pointing in · ${outbound} pointing out` },
+    { key: "operating", label: "operating data", value: Math.min(5, operating), note: operating ? `${operating}/4 operating fields` : profileNote },
+  ];
+}
+
+function constTeamSignalHtml(team, ctx) {
+  const priority = new Set(["market", "build", "research", "cohort"]);
+  const items = constEvidenceItems(team, ctx).filter(item => priority.has(item.key));
+  return `
+    <div class="ac-signal-grid">
+      ${items.map(item => `
+        <div class="ac-signal-card ac-signal-${escAttr(item.key)}">
+          <span>${escHtml(item.label)}</span>
+          <strong>${escHtml(String(item.value))}/5</strong>
+          <p>${escHtml(constShortText(item.note, 104))}</p>
+      </div>`).join("")}
+    </div>`;
+}
+
+const CONST_STACK_COLUMNS = [
+  {
+    key: "substrate",
+    label: "substrate",
+    hint: "runtime, TEE, storage, routing, protocol, or network layer",
+    terms: ["tee", "tdx", "sev", "dstack", "confidential", "cvm", "postgres", "storage", "routing", "router", "protocol", "network", "runtime", "sdk", "evm", "tevm", "identity", "attested", "tls", "infrastructure"],
+  },
+  {
+    key: "developer",
+    label: "developer tooling",
+    hint: "builder workflows, coding agents, frameworks, repos, test systems",
+    terms: ["developer", "github", "code", "coding", "repo", "framework", "plugin", "agent framework", "runtime", "langgraph", "test", "corpus", "programming", "automation", "abstraction", "sdk", "tooling"],
+  },
+  {
+    key: "proof",
+    label: "proof / data",
+    hint: "attestation, research IP, market data, verification, knowledge layer",
+    terms: ["proof", "attestation", "verify", "verified", "measurement", "data", "market data", "research", "paper", "mechanism", "microstructure", "prediction market", "oracle", "belief", "retrieval", "knowledge", "biosensor", "privacy"],
+  },
+  {
+    key: "application",
+    label: "application",
+    hint: "end-user app, workflow, interface, creative or consumer experience",
+    terms: ["app", "ios", "consumer", "speaking", "practice", "chat", "signal", "relationship", "hardware", "creative", "experience", "workflow", "interface", "ux", "payer", "ehr", "prior authorization"],
+  },
+  {
+    key: "market",
+    label: "market / customer",
+    hint: "buyer, GTM, paid pilot, distribution, customer or marketplace motion",
+    terms: ["customer", "buyer", "paid", "pilot", "users", "gtm", "bd", "sales", "distribution", "market", "marketplace", "pharma", "payer", "fundraising", "commercial", "monetization", "retention"],
+  },
+];
+
+const CONST_STACK_ROWS = [
+  { key: "market", label: "customer traction", hint: "traction, paid use, user behavior, ICP, or customer proof" },
+  { key: "build", label: "product shipped", hint: "working product, shipped code, prior shipping, or live prototype" },
+  { key: "research", label: "research lineage", hint: "paper basis, mechanism research, citations, or research-to-product work" },
+  { key: "cohort", label: "cohort leverage", hint: "inbound/outbound cohort relationships and dependency surface" },
+  { key: "profile", label: "profile only", hint: "domain, focus, skills, and current notes; orientation, not proof" },
+];
+const CONST_STACK_ROW_SHORT = {
+  market: "market",
+  build: "shipping",
+  research: "research",
+  cohort: "cohort",
+  profile: "profile",
+};
+const CONST_STACK_COLUMN_SHORT = {
+  substrate: "substrate",
+  developer: "dev tools",
+  proof: "proof / data",
+  application: "app",
+  market: "market",
+};
+
+function constStackSourceText(team) {
+  const j = journeyFor(team);
+  return [
+    team?.name,
+    team?.domain,
+    team?.focus,
+    team?.now,
+    team?.traction,
+    team?.weekly_goals,
+    team?.graduation_target,
+    team?.monthly_milestones,
+    team?.hackathon_note,
+    ...(Array.isArray(team?.skill_areas) ? team.skill_areas : []),
+    ...(Array.isArray(team?.success_dimensions) ? team.success_dimensions : []),
+    ...(Array.isArray(team?.prior_shipping) ? team.prior_shipping : []),
+    ...(Array.isArray(team?.paper_basis) ? team.paper_basis : []),
+    ...(Array.isArray(team?.seeking) ? team.seeking : []),
+    ...(Array.isArray(team?.offering) ? team.offering : []),
+    j.company_type,
+    j.problem,
+    j.solution,
+    j.icp,
+    j.evidence_notes,
+    j.next_milestone,
+  ].map(constText).filter(Boolean).join(" ").toLowerCase();
+}
+
+function constTermMatches(text, term) {
+  const haystack = ` ${String(text || "").toLowerCase().replace(/[^a-z0-9]+/g, " ")} `;
+  const needle = String(term || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  if (!needle) return false;
+  if (haystack.includes(` ${needle} `)) return true;
+  if (needle.includes(" ") || needle.length < 3) return false;
+  const plural = needle.endsWith("s") ? needle.slice(0, -1) : `${needle}s`;
+  return plural.length > 3 && haystack.includes(` ${plural} `);
+}
+
+function constTermHits(text, terms = []) {
+  const hits = [];
+  for (const term of terms) {
+    const needle = String(term || "").toLowerCase();
+    if (needle && constTermMatches(text, needle)) hits.push(needle);
+  }
+  return hits;
+}
+
+const CONST_STACK_TERM_LABELS = new Map([
+  ["tee", "TEE"],
+  ["tdx", "TDX"],
+  ["sev", "SEV"],
+  ["dstack", "dstack"],
+  ["cvm", "CVM"],
+  ["tls", "TLS"],
+  ["sdk", "SDK"],
+  ["evm", "EVM"],
+  ["tevm", "tEVM"],
+  ["github", "GitHub"],
+  ["repo", "repository"],
+  ["langgraph", "LangGraph"],
+  ["ios", "iOS"],
+  ["ux", "UX"],
+  ["ehr", "EHR"],
+  ["gtm", "GTM"],
+  ["bd", "BD"],
+  ["icp", "ICP"],
+  ["paid", "paid use"],
+  ["pilot", "pilot"],
+  ["users", "users"],
+  ["user", "user"],
+  ["customer", "customer"],
+  ["buyer", "buyer"],
+  ["attested", "attestation"],
+  ["attestation", "attestation"],
+  ["confidential", "confidential compute"],
+  ["postgres", "Postgres"],
+  ["prediction market", "prediction market"],
+  ["market data", "market data"],
+  ["agent framework", "agent framework"],
+  ["prior authorization", "prior authorization"],
+]);
+
+function constStackTermLabel(term) {
+  const raw = constText(term).toLowerCase();
+  if (!raw) return "";
+  return CONST_STACK_TERM_LABELS.get(raw) || raw.replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function constStackRoleReason(hits = [], domain = "") {
+  const labels = [];
+  for (const hit of hits) {
+    const label = constStackTermLabel(hit);
+    if (label && !labels.includes(label)) labels.push(label);
+    if (labels.length >= 3) break;
+  }
+  if (labels.length) return `source mentions: ${labels.join(" · ")}`;
+  const domainLabel = CONST_DOMAIN_LABEL[domain];
+  if (domainLabel) return `domain signal: ${domainLabel}`;
+  return "profile only";
+}
+
+function constMarketRoleForTeam(team) {
+  const text = constStackSourceText(team);
+  const domain = constDomainClass(team?.domain);
+  const scores = new Map(CONST_STACK_COLUMNS.map(col => [col.key, 0]));
+  const hitsByKey = new Map();
+  for (const col of CONST_STACK_COLUMNS) {
+    const hits = constTermHits(text, col.terms);
+    hitsByKey.set(col.key, hits);
+    scores.set(col.key, (scores.get(col.key) || 0) + hits.length);
+  }
+  if (domain === "tee") scores.set("substrate", (scores.get("substrate") || 0) + 3);
+  if (domain === "ai") scores.set("developer", (scores.get("developer") || 0) + 2);
+  if (domain === "crypto") {
+    scores.set("proof", (scores.get("proof") || 0) + 1);
+    scores.set("substrate", (scores.get("substrate") || 0) + 1);
+  }
+  if (domain === "app-ux") scores.set("application", (scores.get("application") || 0) + 3);
+  if (constList(team?.paper_basis).length) scores.set("proof", (scores.get("proof") || 0) + 2);
+  if (/paid|pilot|users?|customer|buyer|retention|monetization|gtm|bd/.test(text)) scores.set("market", (scores.get("market") || 0) + 2);
+  const ranked = CONST_STACK_COLUMNS
+    .map((col, idx) => ({ ...col, score: scores.get(col.key) || 0, hits: hitsByKey.get(col.key) || [], idx }))
+    .sort((a, b) => b.score - a.score || a.idx - b.idx);
+  const primary = ranked[0];
+  const secondary = ranked.find(item => item.key !== primary.key && item.score > 0) || null;
+  const roleReason = constStackRoleReason(primary.hits, domain);
+  return {
+    key: primary.key,
+    label: primary.label,
+    score: primary.score,
+    secondary,
+    reason: roleReason,
+  };
+}
+
+function constEvidenceModeForTeam(team, ctx) {
+  const order = new Map(CONST_STACK_ROWS.map((row, idx) => [row.key, idx]));
+  const items = constEvidenceItems(team, ctx);
+  const ranked = items
+    .filter(item => item.key !== "profile" && order.has(item.key))
+    .sort((a, b) => b.value - a.value || order.get(a.key) - order.get(b.key));
+  const top = ranked[0] || { key: "build", value: 0, note: "profile only; no stronger proof signal" };
+  if ((top.value || 0) <= 0) {
+    const profileSpec = CONST_STACK_ROWS.find(row => row.key === "profile");
+    const operating = items.find(item => item.key === "operating");
+    return { ...profileSpec, value: operating?.value || 0, note: profileSpec.hint };
+  }
+  const spec = CONST_STACK_ROWS.find(row => row.key === top.key) || CONST_STACK_ROWS[1];
+  return { ...spec, value: top.value, note: top.note || spec.hint };
+}
+
+function constProductStackModel(teams = [], ctx) {
+  const cells = new Map();
+  for (const row of CONST_STACK_ROWS) {
+    for (const col of CONST_STACK_COLUMNS) cells.set(`${row.key}:${col.key}`, []);
+  }
+  const teamRows = (Array.isArray(teams) ? teams : [])
+    .filter(team => team?.record_id && teamKind(team) !== "person")
+    .map(team => {
+      const role = constMarketRoleForTeam(team);
+      const evidence = constEvidenceModeForTeam(team, ctx);
+      const inbound = ctx?.inBy?.get(team.record_id)?.length || 0;
+      const outbound = ctx?.outBy?.get(team.record_id)?.length || 0;
+      const allEdges = [
+        ...(ctx?.inBy?.get(team.record_id) || []),
+        ...(ctx?.outBy?.get(team.record_id) || []),
+      ];
+      const typed = allEdges.filter(edge => edge.normalized).length;
+      const profile = Math.max(0, allEdges.length - typed);
+      const item = { team, role, evidence, inbound, outbound, typed, profile };
+      const key = `${evidence.key}:${role.key}`;
+      if (!cells.has(key)) cells.set(key, []);
+      cells.get(key).push(item);
+      return item;
+    });
+  for (const list of cells.values()) {
+    list.sort((a, b) =>
+      (b.inbound + b.outbound) - (a.inbound + a.outbound)
+      || String(a.team.name || a.team.record_id).localeCompare(String(b.team.name || b.team.record_id)));
+  }
+  const columnCounts = CONST_STACK_COLUMNS.map(col => ({
+    ...col,
+    count: teamRows.filter(item => item.role.key === col.key).length,
+  }));
+  return { rows: CONST_STACK_ROWS, columns: columnCounts, cells, teamRows, columnCounts };
+}
+
+function constStackItemForTeam(ctx, rid) {
+  const recordId = constText(rid);
+  return (ctx?.stackModel?.teamRows || []).find(item => item.team?.record_id === recordId) || null;
+}
+
+function constStackPlacementHtml(team, ctx) {
+  if (ctx?.mode !== "stack") return "";
+  const item = constStackItemForTeam(ctx, team?.record_id);
+  if (!item) return "";
+  const secondary = item.role.secondary;
+  const proof = `${item.evidence.label}${item.evidence.key === "profile" ? "" : ` · ${item.evidence.value}/5`}`;
+  const secondaryRead = secondary ? `also reads as ${secondary.label}` : "";
+  return `
+    <section class="ac-inspector-section is-stack-placement">
+      <h4>stack placement</h4>
+      <dl class="ac-bet-list">
+        <div><dt>product layer</dt><dd>${escHtml(item.role.label)}</dd></div>
+        ${secondaryRead ? `<div><dt>secondary role</dt><dd>${escHtml(secondaryRead)}</dd></div>` : ""}
+        <div><dt>role basis</dt><dd>${escHtml(constShortText(item.role.reason, 160))}</dd></div>
+        <div><dt>evidence</dt><dd>${escHtml(proof)}</dd></div>
+        <div><dt>evidence basis</dt><dd>${escHtml(constShortText(item.evidence.note, 170))}</dd></div>
+      </dl>
+    </section>`;
+}
+
+function constProductStackHtml(model) {
+  const layerRows = model.columns
+    .map(col => {
+      const items = model.teamRows
+        .filter(item => item.role.key === col.key)
+        .slice()
+        .sort((a, b) =>
+          (b.evidence.value || 0) - (a.evidence.value || 0)
+          || b.typed - a.typed
+          || (b.inbound + b.outbound) - (a.inbound + a.outbound)
+          || String(a.team.name || a.team.record_id).localeCompare(String(b.team.name || b.team.record_id)));
+      return { col, items };
+    })
+    .filter(group => group.items.length);
+  if (!layerRows.length) return `<p class="ac-stack-empty">no companies to place yet.</p>`;
+  return `
+    <div class="ac-stack-view is-layer-list">
+      ${layerRows.map(({ col, items }) => `
+        <section class="ac-stack-layer ac-stack-col-${escAttr(col.key)}">
+          <header class="ac-stack-layer-head">
+            <strong>${escHtml(col.label)}</strong>
+            <span>${escHtml(constTeamCountText(items.length))}</span>
+          </header>
+          <div class="ac-stack-layer-list">
+            ${items.map(item => {
+              const domain = constDomainClass(item.team.domain);
+              const color = CONST_DOMAIN_COLORS[domain] || CONST_DOMAIN_COLORS.other;
+              const relationshipSurface = item.typed + item.profile;
+              const relationship = item.typed
+                ? `${item.typed} relationship record${item.typed === 1 ? "" : "s"}`
+                : (relationshipSurface ? `${item.profile} profile mention${item.profile === 1 ? "" : "s"}` : "no relationship lines");
+              const sourceSignal = item.evidence.key === "profile"
+                ? "profile data"
+                : item.evidence.label;
+              const title = `${item.team.name || item.team.record_id}: ${item.team.focus || item.team.now || item.role.reason || col.label}`;
+              return `
+                <button type="button" class="ac-stack-team ac-stack-domain-${escAttr(domain)}" data-const-team="${escAttr(item.team.record_id)}" title="${escAttr(title)}" aria-label="${escAttr(title)}" style="--team-color:${escAttr(color)};--team-size:12px">
+                  <i aria-hidden="true"></i>
+                  <span>${escHtml(item.team.name || item.team.record_id)}</span>
+                  <p>${escHtml(constShortText(item.team.focus || item.team.now || item.role.reason, 124))}</p>
+                  <em>${escHtml(sourceSignal)}</em>
+                  <small>${escHtml(relationship)}</small>
+                </button>`;
+            }).join("")}
+          </div>
+        </section>`).join("")}
+    </div>`;
+}
+
+function constStackSummaryHtml(ctx) {
+  const model = ctx?.stackModel;
+  if (!model) return "";
+  const top = model.columnCounts.slice().sort((a, b) => b.count - a.count || a.label.localeCompare(b.label)).slice(0, 3);
+  return `
+    <section class="ac-inspector-section is-stack-summary">
+      <h4>largest product layers</h4>
+      <div class="ac-view-chips">
+        ${top.map(item => `<span>${escHtml(item.label)}<em>${escHtml(String(item.count))}</em></span>`).join("")}
+      </div>
+    </section>`;
+}
+
+function constStackReadoutHtml(ctx) {
+  const model = ctx?.stackModel;
+  if (!model) return "";
+  const ordered = model.columnCounts.slice().sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+  const top = ordered[0];
+  const second = ordered[1];
+  const market = ordered.find(item => item.key === "market");
+  const total = model.teamRows?.length || 0;
+  const title = top
+    ? `${top.label} is the largest product layer`
+    : "No product layers to place yet";
+  const body = top
+    ? `${top.count}/${total} projects currently read as ${top.label}${second ? `, followed by ${second.label}` : ""}. ${market && market.count <= Math.max(1, Math.floor(total * 0.16)) ? "Market/customer signal is still thin." : "Market/customer signal is visible but should be checked against traction."}`
+    : "Add team/project records before using the stack view.";
+  return `
+    <section class="ac-main-readout is-stack-readout" aria-label="product stack readout">
+      <div class="ac-inspector-kicker">generated stack read</div>
+      <h3>${escHtml(title)}</h3>
+      <p>${escHtml(body)}</p>
+      <div class="ac-view-chips">
+        ${ordered.slice(0, 4).map(item => `<span>${escHtml(item.label)}<em>${escHtml(String(item.count))}</em></span>`).join("")}
+      </div>
+    </section>`;
+}
+
+function constJourneyReadoutHtml(visibleTeams = [], allTeams = visibleTeams) {
+  const cohortTeams = (Array.isArray(allTeams) ? allTeams : []).filter(team => teamKind(team) !== "person");
+  const visible = (Array.isArray(visibleTeams) ? visibleTeams : []).filter(team => teamKind(team) !== "person");
+  const assessed = cohortTeams.filter(journeyAssessed);
+  const visibleAssessed = visible.filter(journeyAssessed).length;
+  const top = assessed.slice().sort((a, b) => {
+    const aj = journeyFor(a);
+    const bj = journeyFor(b);
+    return bj.evidence_quality - aj.evidence_quality
+      || bj.stage - aj.stage
+      || String(a.name || a.record_id).localeCompare(String(b.name || b.record_id));
+  }).slice(0, 3);
+  const missing = Math.max(0, cohortTeams.length - assessed.length);
+  const title = assessed.length
+    ? `${assessed.length}/${cohortTeams.length} explicit PMF reads`
+    : "PMF journey coverage is missing";
+  const body = assessed.length
+    ? `This view is evidence coverage, not a cohort-wide maturity ranking. ${missing} profile dot${missing === 1 ? "" : "s"} mean missing journey data, not weak companies.`
+    : "Every plotted dot is profile context until a team has an explicit journey read.";
+  return `
+    <section class="ac-main-readout is-journey-readout" aria-label="pmf evidence coverage readout">
+      <div class="ac-inspector-kicker">generated PMF evidence read</div>
+      <h3>${escHtml(title)}</h3>
+      <p>${escHtml(body)}</p>
+      <div class="ac-view-chips">
+        <span>shown assessed<em>${escHtml(String(visibleAssessed))}</em></span>
+        <span>missing assessment<em>${escHtml(String(missing))}</em></span>
+        ${top.map(team => {
+          const j = journeyFor(team);
+          return `<span>${escHtml(team.name || team.record_id)}<em>${escHtml(`${j.stage}/${j.evidence_quality}`)}</em></span>`;
+        }).join("")}
+      </div>
+    </section>`;
+}
+
+function constTeamOperatingHtml(team) {
+  const rows = [
+    ["now", team?.now],
+    ["this week", team?.weekly_goals],
+    ["target", team?.graduation_target],
+  ].filter(([, value]) => constText(value));
+  if (!rows.length) return "";
+  return `
+    <dl class="ac-bet-list ac-operating-list">
+      ${rows.map(([label, value]) => `<div><dt>${escHtml(label)}</dt><dd>${escHtml(constShortText(value, 150))}</dd></div>`).join("")}
+    </dl>`;
+}
+
+function constTeamRelationshipStatsHtml(team, ctx) {
+  const inbound = ctx?.inBy?.get(team?.record_id) || [];
+  const outbound = ctx?.outBy?.get(team?.record_id) || [];
+  const allEdges = [...outbound, ...inbound];
+  if (!allEdges.length) return "";
+  const typed = allEdges.filter(edge => edge.normalized).length;
+  const profileLinks = Math.max(0, allEdges.length - typed);
+  const reliance = allEdges.filter(edge => constRelationshipMeaning(edge).key === "reliance").length;
+  const collaboration = allEdges.filter(edge => constRelationshipMeaning(edge).key === "collaboration").length;
+  return `
+    <div class="ac-inspector-pills is-summary">
+      <span><strong>${escHtml(String(outbound.length))}</strong> outbound</span>
+      <span><strong>${escHtml(String(inbound.length))}</strong> inbound</span>
+      <span><strong>${escHtml(String(typed))}</strong> records</span>
+      ${profileLinks ? `<span><strong>${escHtml(String(profileLinks))}</strong> mentions</span>` : ""}
+      ${reliance ? `<span><strong>${escHtml(String(reliance))}</strong> reliance</span>` : ""}
+      ${collaboration ? `<span><strong>${escHtml(String(collaboration))}</strong> collab</span>` : ""}
+    </div>`;
+}
+
+function constInspectorDetailsHtml(summary, body, open = false) {
+  return `
+    <details class="ac-inspector-details"${open ? " open" : ""}>
+      <summary>${escHtml(summary)}</summary>
+      <div class="ac-inspector-details-body">${body}</div>
+    </details>`;
+}
+
+function constMiniListHtml(title, values, empty = "none listed", max = 3) {
+  const list = constList(values).slice(0, max);
+  return `
+    <div class="ac-inspector-mini">
+      <span>${escHtml(title)}</span>
+      ${list.length
+        ? `<ul>${list.map(v => `<li>${escHtml(constShortText(v, 96))}</li>`).join("")}</ul>`
+        : `<p>${escHtml(empty)}</p>`}
+    </div>`;
+}
+
+function constPersonRelevanceScore(person, team) {
+  const role = String(person?.role || "");
+  const goto = constList(person?.go_to_them_for).join(" ").toLowerCase();
+  const cueText = [
+    ...constList(team?.skill_areas),
+    ...constList(team?.seeking),
+    ...constList(team?.offering),
+    team?.focus,
+    team?.now,
+  ].map(constText).join(" ").toLowerCase();
+  const cueTokens = cueText.split(/[^a-z0-9]+/).filter(token => token.length >= 5);
+  let score = 0;
+  if (/lead|founder|cofounder|co-founder/i.test(role)) score += 8;
+  if (goto) score += 3;
+  for (const token of new Set(cueTokens)) if (goto.includes(token)) score += 2;
+  return score;
+}
+
+function constPeopleForTeam(team, ctx) {
+  return (ctx?.peopleByTeam?.get(team?.record_id) || [])
+    .slice()
+    .sort((a, b) => {
+      const ar = constPersonRelevanceScore(a, team);
+      const br = constPersonRelevanceScore(b, team);
+      return br - ar || String(a.name || a.record_id).localeCompare(String(b.name || b.record_id));
+    });
+}
+
+const CONST_TALK_STOP = new Set(("about across after against also around because before between building builds built candidate cohort could current does doing every from have into next only other project projects record records related relationship should signal source team teams their there these they this through typed want wants where which with without would").split(/\s+/));
+
+function constTalkTokens(values) {
+  const out = new Set();
+  const raw = Array.isArray(values) ? values : [values];
+  for (const item of raw) {
+    const text = constText(item).toLowerCase();
+    if (!text) continue;
+    text.split(/[^a-z0-9+]+/).forEach(token => {
+      if (token.length >= 4 && !CONST_TALK_STOP.has(token)) out.add(token);
+    });
+  }
+  return out;
+}
+
+function constPrimaryWorldByTeam(ctx) {
+  const out = new Map();
+  for (const well of (ctx?.distributionWells || [])) {
+    const id = constText(well?.id);
+    if (!id) continue;
+    const label = constText(well?.label || id);
+    for (const rid of (Array.isArray(well?.members) ? well.members : [])) {
+      if (!out.has(rid)) out.set(rid, { id, label });
+    }
+  }
+  if (out.size) return out;
+  for (const cl of (ctx?.clusters || [])) {
+    const id = constClusterId(cl);
+    if (!id) continue;
+    const label = constClusterLabel(cl);
+    for (const rid of (Array.isArray(cl?.teams) ? cl.teams : [])) {
+      if (!out.has(rid)) out.set(rid, { id, label });
+    }
+  }
+  return out;
+}
+
+function constCorridorEdgeScore(edge, ctx) {
+  const confidence = constText(edge?.confidence).toLowerCase();
+  const confidenceWeight = confidence === "high" ? 3 : (confidence === "medium" ? 2 : (confidence === "low" ? 1 : 0));
+  const sourceCueWeight = Math.min(2, constTranscriptCuesForEdge(edge, ctx, 2).length) * 2;
+  return (edge?.normalized ? 8 : 2)
+    + (constText(edge?.next_action) ? 4 : 0)
+    + (Array.isArray(edge?.evidence) && edge.evidence.length ? 3 : 0)
+    + confidenceWeight
+    + sourceCueWeight;
+}
+
+function constTopCorridors(ctx, max = 3) {
+  const worldByTeam = constPrimaryWorldByTeam(ctx);
+  const teamById = ctx?.teamById || new Map();
+  const rows = new Map();
+  for (const edge of (ctx?.edges || [])) {
+    if (!teamById.has(edge?.from) || !teamById.has(edge?.to)) continue;
+    const fromWorld = worldByTeam.get(edge.from);
+    const toWorld = worldByTeam.get(edge.to);
+    if (!fromWorld || !toWorld || fromWorld.id === toWorld.id) continue;
+    const pair = [fromWorld, toWorld].sort((a, b) => a.id.localeCompare(b.id));
+    const key = `${pair[0].id}::${pair[1].id}`;
+    const current = rows.get(key) || {
+      key,
+      a: pair[0],
+      b: pair[1],
+      typed: 0,
+      profile: 0,
+      score: 0,
+      teams: new Set(),
+      topEdge: null,
+      topScore: -Infinity,
+    };
+    const edgeScore = constCorridorEdgeScore(edge, ctx);
+    current.score += edgeScore;
+    if (edge?.normalized) current.typed++;
+    else current.profile++;
+    current.teams.add(edge.from);
+    current.teams.add(edge.to);
+    if (edgeScore > current.topScore) {
+      current.topScore = edgeScore;
+      current.topEdge = edge;
+    }
+    rows.set(key, current);
+  }
+  return [...rows.values()]
+    .sort((a, b) =>
+      b.score - a.score
+      || b.typed - a.typed
+      || b.profile - a.profile
+      || a.a.label.localeCompare(b.a.label)
+      || a.b.label.localeCompare(b.b.label))
+    .slice(0, max);
+}
+
+function constLineBasisText(typed, profile) {
+  const parts = [];
+  if (typed) parts.push(`${typed} record line${typed === 1 ? "" : "s"}`);
+  if (profile) parts.push(`${profile} profile mention${profile === 1 ? "" : "s"}`);
+  return parts.length ? parts.join(" · ") : "no relationship lines";
+}
+
+function constMapReadout(ctx) {
+  const breakdown = constRelationshipBreakdown(ctx?.edges || []);
+  const corridors = constTopCorridors(ctx, 3);
+  const top = corridors[0] || null;
+  const title = top
+    ? `${top.a.label} to ${top.b.label}`
+    : "Start with the bright lines";
+  const body = top
+    ? `${top.a.label} to ${top.b.label} is the strongest current cross-world corridor from the source bundle. Line mix: ${constLineBasisText(top.typed, top.profile)}.`
+    : "No cross-world corridor is strong enough to headline yet; inspect the relationship rows first.";
+  const caveat = `${breakdown.typed} relationship record${breakdown.typed === 1 ? "" : "s"} and ${breakdown.missing} profile mention${breakdown.missing === 1 ? "" : "s"}. Solid lines have records; dotted lines are leads to verify.`;
+  return { title, body, caveat, corridors, breakdown };
+}
+
+function constMapReadoutHeroHtml(ctx, kicker = "generated readout") {
+  const read = constMapReadout(ctx);
+  return `
+    <div class="ac-inspector-hero is-generated-readout">
+      <div class="ac-inspector-kicker">${escHtml(kicker)}</div>
+      <h3>${escHtml(read.title)}</h3>
+      <p>${escHtml(read.body)}</p>
+      <div class="ac-inspector-pills">
+        <span><strong>${escHtml(String(read.breakdown.typed))}</strong> records</span>
+        <span><strong>${escHtml(String(read.breakdown.missing))}</strong> mentions</span>
+      </div>
+      <p class="ac-rel-queue-more">${escHtml(read.caveat)}</p>
+    </div>`;
+}
+
+function constCorridorReadoutHtml(ctx) {
+  const corridors = constTopCorridors(ctx, 3);
+  if (!corridors.length) return "";
+  return `
+    <section class="ac-inspector-section ac-action-card is-corridor-readout">
+      <h4>top corridors</h4>
+      <div class="ac-action-list">
+        ${corridors.map(row => {
+          const edge = row.topEdge;
+          const fromName = ctx?.teamById?.get(edge?.from)?.name || edge?.from || "source";
+          const toName = ctx?.teamById?.get(edge?.to)?.name || edge?.to || "target";
+          return `
+            <button type="button" class="ac-action-row${edge?.normalized ? " is-source-backed" : " is-profile-link"}" data-const-edge-from="${escAttr(edge?.from || "")}" data-const-edge-to="${escAttr(edge?.to || "")}">
+              <strong>${escHtml(row.a.label)} to ${escHtml(row.b.label)}</strong>
+              <p>${escHtml(constLineBasisText(row.typed, row.profile))} · ${escHtml(String(row.teams.size))} teams touched</p>
+              <small>${escHtml(`${fromName} -> ${toName}: ${constRelationshipMeaning(edge).label}`)}</small>
+            </button>`;
+        }).join("")}
+      </div>
+    </section>`;
+}
+
+function constDataCoverageHtml(ctx) {
+  const breakdown = constRelationshipBreakdown(ctx?.edges || []);
+  const coverage = constConstellationCoverage(ctx?.teams || [], ctx?.edges || []);
+  const missingOwner = (ctx?.edges || []).filter(edge => edge?.normalized && !constText(edge.owner)).length;
+  const missingJourney = Math.max(0, coverage.teams - coverage.assessed);
+  return `
+    <section class="ac-inspector-section is-data-coverage">
+      <h4>source caveat</h4>
+      <div class="ac-view-chips">
+        <span>record lines<em>${escHtml(String(breakdown.typed))}</em></span>
+        <span>profile mentions<em>${escHtml(String(breakdown.missing))}</em></span>
+        <span>missing journey<em>${escHtml(String(missingJourney))}</em></span>
+        ${missingOwner ? `<span>missing owner<em>${escHtml(String(missingOwner))}</em></span>` : ""}
+      </div>
+      <p class="ac-rel-queue-more">Profile-mention lines are leads. They should not read as source-backed relationships until a relationship record supplies evidence, owner, and next action.</p>
+    </section>`;
+}
+
+function constTalkTokenOverlap(a, b) {
+  const aa = constTalkTokens(a);
+  const bb = constTalkTokens(b);
+  const shared = [];
+  for (const token of aa) if (bb.has(token)) shared.push(token);
+  return shared;
+}
+
+function constSharedSkillList(a, b) {
+  const bSkills = new Set(constTeamSkillList(b).map(s => s.toLowerCase()));
+  return constTeamSkillList(a).filter(s => bSkills.has(s.toLowerCase()));
+}
+
+function constTeamWorldRows(team, ctx) {
+  const memberships = constClusterMembershipByTeam(ctx?.clusters || []).get(team?.record_id) || [];
+  return memberships.map(item => item.label).filter(Boolean);
+}
+
+function constTeamEvidenceLevel(team, ctx) {
+  const inbound = ctx?.inBy?.get(team?.record_id) || [];
+  const outbound = ctx?.outBy?.get(team?.record_id) || [];
+  const allEdges = [...outbound, ...inbound];
+  const typed = allEdges.filter(edge => edge.normalized).length;
+  const profile = Math.max(0, allEdges.length - typed);
+  const cues = constTranscriptCuesForTeam(team).length;
+  if (typed) {
+    return {
+      key: "typed",
+      label: "relationship record",
+      note: `${typed} source-backed line${typed === 1 ? "" : "s"}${profile ? ` plus ${profile} profile mention${profile === 1 ? "" : "s"}` : ""}.`,
+    };
+  }
+  if (profile) {
+    return {
+      key: "profile",
+      label: "profile mention",
+      note: `${profile} profile mention${profile === 1 ? "" : "s"}; no relationship record yet.`,
+    };
+  }
+  if (cues) {
+    return {
+      key: "cue",
+      label: "source cue only",
+      note: `${cues} transcript/source cue${cues === 1 ? "" : "s"}; no relationship line yet.`,
+    };
+  }
+  return {
+    key: "profile",
+    label: "profile data only",
+    note: "No relationship line is attached yet.",
+  };
+}
+
+function constSeekingOfferingCue(a, b) {
+  const aSeeking = constList(a?.seeking);
+  const aOffering = constList(a?.offering);
+  const bSeeking = constList(b?.seeking);
+  const bOffering = constList(b?.offering);
+  const aNeedsB = constTalkTokenOverlap(aSeeking, bOffering);
+  const bNeedsA = constTalkTokenOverlap(bSeeking, aOffering);
+  if (aNeedsB.length) {
+    const seeking = constShortText(aSeeking[0] || "listed help", 92);
+    const offering = constShortText(bOffering[0] || "related support", 92);
+    return {
+      score: aNeedsB.length,
+      direction: `${a?.name || a?.record_id} is seeking ${seeking}; ${b?.name || b?.record_id} may offer related help.`,
+      detail: `${seeking} / ${offering}`,
+    };
+  }
+  if (bNeedsA.length) {
+    const seeking = constShortText(bSeeking[0] || "listed help", 92);
+    const offering = constShortText(aOffering[0] || "related support", 92);
+    return {
+      score: bNeedsA.length,
+      direction: `${b?.name || b?.record_id} is seeking ${seeking}; ${a?.name || a?.record_id} may offer related help.`,
+      detail: `${seeking} / ${offering}`,
+    };
+  }
+  return { score: 0, direction: "", detail: "" };
+}
+
+function constTeamTalkCandidates(team, ctx, max = 3) {
+  if (!team?.record_id) return [];
+  const teamById = ctx?.teamById || new Map();
+  const outbound = ctx?.outBy?.get(team.record_id) || [];
+  const inbound = ctx?.inBy?.get(team.record_id) || [];
+  const edges = [...outbound, ...inbound];
+  const membershipsByTeam = constClusterMembershipByTeam(ctx?.clusters || []);
+  const ownWorlds = new Set((membershipsByTeam.get(team.record_id) || []).map(item => item.id));
+  const candidates = [];
+  const seen = new Set();
+  const seenTeams = new Set();
+  const addCandidate = row => {
+    if (!row?.team?.record_id || row.team.record_id === team.record_id) return;
+    const key = row.edge ? dependencyPairKey(row.edge.from, row.edge.to) : row.team.record_id;
+    if (seen.has(key) || seenTeams.has(row.team.record_id)) return;
+    seen.add(key);
+    seenTeams.add(row.team.record_id);
+    candidates.push(row);
+  };
+
+  for (const edge of edges) {
+    const otherId = edge.from === team.record_id ? edge.to : edge.from;
+    const other = teamById.get(otherId);
+    if (!other) continue;
+    const sharedSkills = constSharedSkillList(team, other);
+    const cue = constSeekingOfferingCue(team, other);
+    const otherWorlds = new Set((membershipsByTeam.get(other.record_id) || []).map(item => item.id));
+    const crossesWorld = [...otherWorlds].some(id => !ownWorlds.has(id));
+    const nextAction = constText(edge.next_action);
+    const score = (edge.normalized ? 100 : 38)
+      + (nextAction ? 28 : 0)
+      + (edge.evidence?.length ? 12 : 0)
+      + (edge.confidence === "high" ? 12 : edge.confidence === "medium" ? 8 : edge.confidence === "low" ? 4 : 0)
+      + cue.score * 6
+      + sharedSkills.length * 2
+      + (crossesWorld ? 5 : 0);
+    const basis = edge.normalized
+      ? "relationship record"
+      : "profile mention";
+    const action = nextAction
+      || cue.direction
+      || constRelationshipOneLine(edge, team.name || team.record_id, other.name || other.record_id);
+    const detail = nextAction
+      ? constRelationshipOneLine(edge, teamById.get(edge.from)?.name || edge.from, teamById.get(edge.to)?.name || edge.to)
+      : cue.detail || (sharedSkills.length ? `shared skills: ${sharedSkills.slice(0, 3).join(", ")}` : (crossesWorld ? "cross-world corridor" : constRelationshipStatus(edge).note));
+    addCandidate({ team: other, edge, score, basis, action, detail, sourceBacked: Boolean(edge.normalized) });
+  }
+
+  for (const other of (ctx?.teams || [])) {
+    if (!other?.record_id || other.record_id === team.record_id || seen.has(other.record_id)) continue;
+    const cue = constSeekingOfferingCue(team, other);
+    const sharedSkills = constSharedSkillList(team, other);
+    const otherWorlds = new Set((membershipsByTeam.get(other.record_id) || []).map(item => item.id));
+    const sharedWorlds = [...otherWorlds].filter(id => ownWorlds.has(id));
+    const score = cue.score * 10 + sharedSkills.length * 2 + sharedWorlds.length;
+    if (score < 4) continue;
+    const action = cue.direction || `Talk to ${other.name || other.record_id} about shared ${sharedSkills.slice(0, 2).join(", ") || "cohort context"}.`;
+    const detail = cue.detail || (sharedSkills.length ? `shared skills: ${sharedSkills.slice(0, 3).join(", ")}` : "same ecosystem corridor");
+    addCandidate({ team: other, edge: null, score, basis: "seeking/offering overlap", action, detail, sourceBacked: false });
+  }
+
+  return candidates
+    .sort((a, b) => b.score - a.score || String(a.team.name || a.team.record_id).localeCompare(String(b.team.name || b.team.record_id)))
+    .slice(0, max);
+}
+
+function constTeamActionCardHtml(team, ctx) {
+  const rows = constTeamTalkCandidates(team, ctx, 3);
+  return `
+    <section class="ac-inspector-section ac-action-card is-talk-next">
+      <h4>who should talk next</h4>
+      ${rows.length ? `
+        <div class="ac-action-list">
+          ${rows.map(row => {
+            const dataAttrs = row.edge
+              ? `data-const-edge-from="${escAttr(row.edge.from)}" data-const-edge-to="${escAttr(row.edge.to)}"`
+              : `data-const-team="${escAttr(row.team.record_id)}"`;
+            return `
+              <button type="button" class="ac-action-row${row.sourceBacked ? " is-source-backed" : " is-profile-link"}" ${dataAttrs}>
+                <strong>${escHtml(row.team.name || row.team.record_id)}</strong>
+                <p>${escHtml(constShortText(row.action, 170))}</p>
+                ${row.detail ? `<small>${escHtml(constShortText(row.detail, 140))}</small>` : ""}
+              </button>`;
+          }).join("")}
+        </div>`
+      : `<p class="ac-inspector-empty">No clear next conversation from relationships, seeking/offering, or shared skills yet.</p>`}
+    </section>`;
+}
+
+function constEdgeSharedWorlds(from, to, ctx) {
+  const memberships = constClusterMembershipByTeam(ctx?.clusters || []);
+  const a = memberships.get(from?.record_id) || [];
+  const b = memberships.get(to?.record_id) || [];
+  const bIds = new Set(b.map(item => item.id));
+  return a.filter(item => bIds.has(item.id)).map(item => item.label).filter(Boolean);
+}
+
+function constEdgeClearAnswer(edge, from, to, ctx) {
+  const sharedSkills = constSharedSkillList(from, to);
+  const sharedWorlds = constEdgeSharedWorlds(from, to, ctx);
+  const cue = constSeekingOfferingCue(from, to);
+  const fromDepends = constList(from?.dependencies).map(x => x.toLowerCase()).includes(String(to?.record_id || "").toLowerCase());
+  const toDepends = constList(to?.dependencies).map(x => x.toLowerCase()).includes(String(from?.record_id || "").toLowerCase());
+  const fromNeed = constList(from?.seeking)[0] || "";
+  const toOffer = constList(to?.offering)[0] || "";
+  const fromNow = constText(from?.now || from?.focus);
+  const toNow = constText(to?.now || to?.focus);
+  const source = constRelationshipSource(edge);
+  const nextAction = constText(edge?.next_action);
+  let answer = "";
+  let next = nextAction;
+  if (edge?.normalized) {
+    answer = constText(edge.reason)
+      || constRelationshipDirection(edge, from.name || from.record_id, to.name || to.record_id)
+      || constRelationshipOneLine(edge, from.name || from.record_id, to.name || to.record_id);
+  } else if (cue.direction) {
+    answer = cue.direction;
+  } else if (fromDepends && toDepends) {
+    answer = `${from.name || from.record_id} and ${to.name || to.record_id} both point at each other in their profiles. Treat this as a likely integration conversation, not a confirmed dependency.`;
+  } else if (fromDepends) {
+    answer = `${from.name || from.record_id} names ${to.name || to.record_id} as a dependency. Verify whether ${to.name || to.record_id}'s ${toOffer || toNow || "listed work"} can support ${fromNeed || fromNow || "the current project need"}.`;
+  } else if (toDepends) {
+    answer = `${to.name || to.record_id} names ${from.name || from.record_id} as a dependency. Verify whether ${from.name || from.record_id}'s ${constList(from?.offering)[0] || fromNow || "listed work"} can support ${constList(to?.seeking)[0] || toNow || "the current project need"}.`;
+  } else {
+    answer = constRelationshipOneLine(edge, from.name || from.record_id, to.name || to.record_id);
+  }
+  if (!next) {
+    if (edge?.normalized) {
+      next = "Confirm the owner and next test for this relationship record.";
+    } else if (fromDepends && toDepends) {
+      next = `Ask whether ${to.name || to.record_id} should become the attestation / contract layer inside a ${from.name || from.record_id} workflow, or whether the overlap is only conceptual.`;
+    } else {
+      next = "Turn this profile mention into a relationship record only if both teams confirm the concrete collaboration.";
+    }
+  }
+  const whyParts = [];
+  if (sharedSkills.length) whyParts.push(`shared skills: ${sharedSkills.slice(0, 4).join(", ")}`);
+  if (sharedWorlds.length) whyParts.push(`shared worlds: ${sharedWorlds.slice(0, 3).join(", ")}`);
+  if (cue.detail) whyParts.push(cue.detail);
+  if (!whyParts.length) whyParts.push(source.note);
+  return {
+    answer,
+    next,
+    why: whyParts.join(" / "),
+    caveat: edge?.normalized ? "Relationship record: use this as relationship evidence." : "Profile mention: use this as a conversation lead until a relationship record exists.",
+  };
+}
+
+function constPersonChipHtml(person) {
+  const goto = constList(person?.go_to_them_for).slice(0, 2).join(" · ");
+  const meta = [person?.role, goto].map(constText).filter(Boolean).join(" · ");
+  return `
+    <button type="button" class="ac-person-chip" data-const-person="${escAttr(person.record_id)}">
+      <span>${escHtml(person.name || person.record_id)}</span>
+      ${meta ? `<small>${escHtml(constShortText(meta, 120))}</small>` : ""}
+    </button>`;
+}
+
+function constTeamPeopleHtml(team, ctx) {
+  const people = constPeopleForTeam(team, ctx).slice(0, 4);
+  if (!people.length) return "";
+  return `
+    <section class="ac-inspector-section is-people">
+      <h4>team contacts</h4>
+      <div class="ac-person-list">${people.map(constPersonChipHtml).join("")}</div>
+    </section>`;
+}
+
+function constRelationshipChipHtml(edge, ctx, perspectiveRid) {
+  const from = ctx?.teamById?.get(edge.from);
+  const to = ctx?.teamById?.get(edge.to);
+  if (!from || !to) return "";
+  const other = perspectiveRid === edge.from ? to : from;
+  const meaning = constRelationshipMeaning(edge);
+  const status = constRelationshipStatus(edge);
+  const line = constRelationshipOneLine(edge, from.name || from.record_id, to.name || to.record_id);
+  return `
+    <button type="button" class="ac-relation-chip ac-relation-chip-${escAttr(meaning.key)}" data-const-edge-from="${escAttr(edge.from)}" data-const-edge-to="${escAttr(edge.to)}">
+      <span>${escHtml(other.name || other.record_id)}</span>
+      <strong>${escHtml(meaning.label)}</strong>
+      <small>${escHtml(constShortText(line, 115))}</small>
+      <em>${escHtml(status.label)}</em>
+    </button>`;
+}
+
+function constLensMatchesEdge(edge, lens = "all") {
+  if (lens === "all") return true;
+  if (!edge?.normalized) return false;
+  const meaning = constRelationshipMeaning(edge).key;
+  if (lens === "relies") return meaning === "reliance";
+  if (lens === "works") return meaning === "collaboration";
+  if (lens === "substrate") return meaning === "ecosystem";
+  return true;
+}
+
+function constRelationshipPriority(edge, lens = "all") {
+  if ((lens === "relies" || lens === "works" || lens === "substrate") && edge?.normalized) {
+    const meaning = constRelationshipMeaning(edge).key;
+    if (lens === "relies" && meaning === "reliance") return { score: 98, label: edge.status === "blocked" ? "blocked reliance" : "reliance" };
+    if (lens === "works" && meaning === "collaboration") return { score: 92, label: "collaboration" };
+    if (lens === "substrate" && meaning === "ecosystem") return { score: 88, label: "substrate" };
+  }
+  if (!edge?.normalized) return { score: 44, label: "profile mention" };
+  if (edge.status === "blocked") return { score: 100, label: "blocked" };
+  if (edge.status === "active") return { score: 94, label: "active line" };
+  if (edge.confidence === "high") return { score: 90, label: "verified record" };
+  if (edge.confidence === "medium") return { score: 86, label: "source-backed record" };
+  if (constText(edge.next_action)) return { score: 82, label: "relationship record" };
+  if (edge.confidence === "low") return { score: 78, label: "candidate record" };
+  if (edge.status === "exploring") return { score: 72, label: "exploring" };
+  return { score: 40, label: edge.status_label || "relationship" };
+}
+
+function constDiverseRelationshipQueue(items = [], max = 6) {
+  const selected = [];
+  const selectedKeys = new Set();
+  const endpointCounts = new Map();
+  const meaningCounts = new Map();
+  const keyFor = item => dependencyPairKey(item.edge.from, item.edge.to);
+  const endpointOk = item => {
+    const fromCount = endpointCounts.get(item.edge.from) || 0;
+    const toCount = endpointCounts.get(item.edge.to) || 0;
+    return fromCount < 2 && toCount < 2;
+  };
+  const meaningOk = item => (meaningCounts.get(item.meaning.key) || 0) < 2;
+  const push = item => {
+    const key = keyFor(item);
+    if (selectedKeys.has(key) || selected.length >= max) return false;
+    selected.push(item);
+    selectedKeys.add(key);
+    endpointCounts.set(item.edge.from, (endpointCounts.get(item.edge.from) || 0) + 1);
+    endpointCounts.set(item.edge.to, (endpointCounts.get(item.edge.to) || 0) + 1);
+    meaningCounts.set(item.meaning.key, (meaningCounts.get(item.meaning.key) || 0) + 1);
+    return true;
+  };
+  for (const item of items) {
+    if (endpointOk(item) && meaningOk(item)) push(item);
+    if (selected.length >= max) return selected;
+  }
+  for (const item of items) {
+    if (endpointOk(item)) push(item);
+    if (selected.length >= max) return selected;
+  }
+  for (const item of items) {
+    push(item);
+    if (selected.length >= max) return selected;
+  }
+  return selected;
+}
+
+function constRelationshipQueue(ctx, max = 6) {
+  const teamById = ctx?.teamById || new Map();
+  const lens = ctx?.lens || "all";
+  const ranked = (ctx?.edges || [])
+    .filter(edge => teamById.has(edge.from) && teamById.has(edge.to))
+    .filter(edge => constInterestOwnsEdge(edge, ctx?.interest))
+    .filter(edge => constLensMatchesEdge(edge, lens))
+    .map(edge => {
+      const priority = constRelationshipPriority(edge, lens);
+      const meaning = constRelationshipMeaning(edge);
+      return {
+        edge,
+        priority,
+        meaning,
+        fromName: teamById.get(edge.from)?.name || edge.from,
+        toName: teamById.get(edge.to)?.name || edge.to,
+      };
+    })
+    .sort((a, b) =>
+      b.priority.score - a.priority.score
+      || Number(b.edge.normalized) - Number(a.edge.normalized)
+      || String(a.fromName).localeCompare(String(b.fromName))
+      || String(a.toName).localeCompare(String(b.toName)));
+  return constDiverseRelationshipQueue(ranked, max);
+}
+
+function constRelationshipQueueHtml(ctx, opts = {}) {
+  const max = Number(opts.max) > 0 ? Number(opts.max) : 6;
+  const queue = constRelationshipQueue(ctx, max);
+  if (!queue.length) return `<p class="ac-inspector-empty">no connections to inspect yet.</p>`;
+  const total = (ctx?.edges || [])
+    .filter(edge => ctx?.teamById?.has(edge.from) && ctx?.teamById?.has(edge.to))
+    .filter(edge => constInterestOwnsEdge(edge, ctx?.interest))
+    .filter(edge => constLensMatchesEdge(edge, ctx?.lens || "all")).length;
+  const remaining = Math.max(0, total - queue.length);
+  return `
+    <div class="ac-rel-queue${opts.compact ? " is-compact" : ""}">
+      ${queue.map(({ edge, meaning, fromName, toName }) => {
+        return `
+        <button type="button" class="ac-rel-row ac-rel-row-${escAttr(meaning.key)}${edge.normalized ? " is-source-backed" : " is-profile-link"}" data-const-edge-from="${escAttr(edge.from)}" data-const-edge-to="${escAttr(edge.to)}">
+          <span class="ac-rel-row-copy">
+          <span class="ac-rel-row-top">
+            <strong>${escHtml(fromName)} → ${escHtml(toName)}</strong>
+            <em>${escHtml(meaning.label)}</em>
+          </span>
+          <span class="ac-rel-row-summary">${escHtml(constRelationshipOneLine(edge, fromName, toName))}</span>
+          </span>
+        </button>`;
+      }).join("")}
+      ${remaining ? `<p class="ac-rel-queue-more">${escHtml(String(remaining))} more line${remaining === 1 ? "" : "s"} in graph.</p>` : ""}
+    </div>`;
+}
+
+function constBridgeTeamRows(ctx, max = 5) {
+  const teamById = ctx?.teamById || new Map();
+  const membershipsByTeam = constClusterMembershipByTeam(ctx?.clusters || []);
+  const rows = (ctx?.teams || [])
+    .filter(team => team?.record_id && teamById.has(team.record_id))
+    .map(team => {
+      const memberships = membershipsByTeam.get(team.record_id) || [];
+      const ownClusters = new Set(memberships.map(item => item.id));
+      const touching = (ctx?.edges || [])
+        .filter(edge => edge?.from === team.record_id || edge?.to === team.record_id)
+        .filter(edge => teamById.has(edge.from) && teamById.has(edge.to));
+      const typed = touching.filter(edge => edge.normalized);
+      const profile = touching.length - typed.length;
+      const touchedClusters = new Set(ownClusters);
+      let typedCrossWorld = 0;
+      let profileCrossWorld = 0;
+      for (const edge of touching) {
+        const otherId = edge.from === team.record_id ? edge.to : edge.from;
+        const otherClusters = membershipsByTeam.get(otherId) || [];
+        const otherClusterIds = new Set(otherClusters.map(item => item.id));
+        for (const item of otherClusters) touchedClusters.add(item.id);
+        const crosses = [...otherClusterIds].some(id => !ownClusters.has(id));
+        if (crosses && edge.normalized) typedCrossWorld++;
+        else if (crosses) profileCrossWorld++;
+      }
+      const secondary = Math.max(0, memberships.length - 1);
+      const score = typedCrossWorld * 7
+        + Math.max(0, typed.length - typedCrossWorld) * 3
+        + touchedClusters.size * 1.5
+        + secondary * 2
+        + profileCrossWorld * 0.7;
+      return {
+        team,
+        score,
+        worlds: touchedClusters.size,
+        typed: typed.length,
+        profile,
+        secondary,
+        typedCrossWorld,
+        profileCrossWorld,
+      };
+    })
+    .filter(row => row.score > 0)
+    .sort((a, b) =>
+      b.score - a.score
+      || b.typedCrossWorld - a.typedCrossWorld
+      || b.worlds - a.worlds
+      || String(a.team.name || a.team.record_id).localeCompare(String(b.team.name || b.team.record_id)));
+  return rows.slice(0, max);
+}
+
+function constBridgeTeamRowsHtml(ctx, max = 5) {
+  const rows = constBridgeTeamRows(ctx, max);
+  if (!rows.length) return `<p class="ac-inspector-empty">no bridge projects in the current relationship graph.</p>`;
+  return `
+    <div class="ac-bridge-list">
+      ${rows.map((row, idx) => `
+        <button type="button" class="ac-bridge-row" data-const-team="${escAttr(row.team.record_id)}">
+          <span>${escHtml(row.team.name || row.team.record_id)}</span>
+          <strong>#${escHtml(String(idx + 1))} bridge</strong>
+          <small>${escHtml(`${row.worlds} worlds · ${row.typed} records · ${row.profile} mentions`)}</small>
+        </button>`).join("")}
+    </div>`;
+}
+
+function constPersonInspectorHtml(person, ctx) {
+  if (!person) return constellationInspectorDefaultHtml(ctx);
+  const team = ctx?.teamById?.get(person.team);
+  const secondaryTeams = (Array.isArray(person.secondary_teams) ? person.secondary_teams : [])
+    .map(id => ctx?.teamById?.get(id) || { record_id: id, name: id })
+    .filter(Boolean);
+  const goto = constList(person.go_to_them_for);
+  const themes = constList(person.recurring_themes);
+  const now = constText(person.now || person.weekly_intention || person.working_style);
+  const attachedLabel = team?.name || person.team || "not attached to a project";
+  return `
+    <div class="ac-inspector-hero" data-const-selected-person="${escAttr(person.record_id)}">
+      <div class="ac-inspector-kicker">selected person</div>
+      <h3><button type="button" class="ac-inspector-name-link" data-const-open-record="${escAttr(person.record_id)}">${escHtml(constPersonDisplayName(person))}</button></h3>
+      <p>${escHtml(constShortText([constPersonRoleLabel(person), attachedLabel].filter(Boolean).join(" · "), 150))}</p>
+      <div class="ac-inspector-pills">
+        <span>${escHtml(CONST_DOMAIN_LABEL[constDomainClass(person.domain || team?.domain)] || "other")}</span>
+        <span>${escHtml(constText(person.role_class).replace(/-/g, " ") || "participant")}</span>
+        ${person.geo ? `<span>${escHtml(person.geo)}</span>` : ""}
+      </div>
+      <div class="ac-inspector-actions">
+        ${team?.record_id ? `<button type="button" class="ac-mini-action" data-const-team="${escAttr(team.record_id)}">inspect project</button>` : ""}
+      </div>
+    </div>
+    <section class="ac-inspector-section ac-action-card is-why-here">
+      <h4>project connection</h4>
+      <dl class="ac-action-facts">
+        <div>
+          <dt>primary</dt>
+          <dd>${team ? `<button type="button" class="ac-inline-record" data-const-team="${escAttr(team.record_id)}">${escHtml(team.name || team.record_id)}</button>` : escHtml(attachedLabel)}</dd>
+        </div>
+        ${secondaryTeams.length ? `<div><dt>secondary</dt><dd>${secondaryTeams.map(t => `<button type="button" class="ac-inline-record" data-const-team="${escAttr(t.record_id)}">${escHtml(t.name || t.record_id)}</button>`).join(" ")}</dd></div>` : ""}
+        <div>
+          <dt>source</dt>
+          <dd><strong>person profile</strong><span>Primary and secondary links come from person record fields.</span></dd>
+        </div>
+      </dl>
+    </section>
+    ${goto.length ? `
+      <section class="ac-inspector-section">
+        <h4>go to them for</h4>
+        <ul class="ac-inspector-list">${goto.slice(0, 5).map(item => `<li>${escHtml(constShortText(item, 120))}</li>`).join("")}</ul>
+      </section>` : ""}
+    ${themes.length ? `
+      <section class="ac-inspector-section">
+        <h4>themes</h4>
+        <div class="ac-view-chips">${themes.slice(0, 5).map(item => `<span>${escHtml(item)}</span>`).join("")}</div>
+      </section>` : ""}
+    ${now ? `
+      <section class="ac-inspector-section ac-action-card">
+        <h4>current note</h4>
+        <p>${escHtml(constShortText(now, 220))}</p>
+      </section>` : ""}`;
+}
+
+function constPeopleDefaultHtml(ctx) {
+  const model = ctx?.peopleModel || constPeopleNetworkModel(ctx?.people || [], ctx?.teams || []);
+  const links = model.edges || [];
+  const groups = (model.groups || [])
+    .filter(group => group.kind === "team")
+    .map(row => ({
+      team: row.team,
+      count: row.people.length,
+    }))
+    .filter(row => row.count > 0)
+    .sort((a, b) => b.count - a.count || String(a.team.name || a.team.record_id).localeCompare(String(b.team.name || b.team.record_id)))
+    .slice(0, 4);
+  const linkRows = links.slice(0, 4).map(edge => ({
+    edge,
+    a: model.peopleById?.get(edge.a),
+    b: model.peopleById?.get(edge.b),
+  })).filter(row => row.a && row.b);
+  const kindLabel = kind => ({
+    "same-team": "same project",
+    "secondary-overlap": "secondary overlap",
+    "pair-with": "pair_with",
+    "shared-context": "shared context",
+  }[kind] || "profile context");
+  return `
+    <div class="ac-inspector-hero is-confidence">
+      <div class="ac-inspector-kicker">people graph</div>
+      <h3>People grouped by project, connected by profile evidence</h3>
+      <p>Each circle is a primary project group. Lines connect people through same-project membership, explicit secondary links, pair-with fields, or shared declared context.</p>
+    </div>
+    <section class="ac-inspector-section is-rel-queue">
+      <h4>strongest people links</h4>
+      <div class="ac-rel-queue is-compact">
+        ${linkRows.length ? linkRows.map(row => `
+          <button type="button" class="ac-rel-row" data-const-person="${escAttr(row.a.record_id)}">
+            <span class="ac-rel-row-copy">
+              <span class="ac-rel-row-top"><strong>${escHtml(constPersonDisplayName(row.a))} ↔ ${escHtml(constPersonDisplayName(row.b))}</strong><em>${escHtml(kindLabel(row.edge.kind))}</em></span>
+              <span class="ac-rel-row-summary">${escHtml(constShortText(row.edge.reason, 130))}</span>
+            </span>
+          </button>`).join("") : `<p class="ac-inspector-empty">No person-to-person links can be inferred yet.</p>`}
+      </div>
+      <p class="ac-rel-queue-more">${escHtml(String(links.length))} visible person link${links.length === 1 ? "" : "s"} from profile fields and shared declared context.</p>
+    </section>
+    <section class="ac-inspector-section is-rel-queue">
+      <h4>largest project circles</h4>
+      <div class="ac-rel-queue is-compact">
+        ${groups.length ? groups.map(row => `
+          <button type="button" class="ac-rel-row" data-const-team="${escAttr(row.team.record_id)}">
+            <span class="ac-rel-row-copy">
+              <span class="ac-rel-row-top"><strong>${escHtml(row.team.name || row.team.record_id)}</strong><em>${escHtml(String(row.count))} people</em></span>
+              <span class="ac-rel-row-summary">${escHtml(constShortText(row.team.focus || row.team.now || "", 120) || "project profile")}</span>
+            </span>
+          </button>`).join("") : `<p class="ac-inspector-empty">No project memberships are listed yet.</p>`}
+      </div>
+    </section>`;
+}
+
+function constTeamInspectorHtml(team, ctx) {
+  if (!team) return constellationInspectorDefaultHtml(ctx);
+  const j = journeyFor(team);
+  const assessed = journeyAssessed(team);
+  const success = constSuccessDimensions(team);
+  const liveBet = j.solution || team.now || team.focus || "";
+  const firstSeekingItem = constList(team.seeking)[0] || "";
+  const uncertainty = assessed
+    ? [j.primary_bottleneck, j.problem].filter(Boolean).join(" · ")
+    : "";
+  const nextTest = j.next_milestone || constText(team.weekly_goals) || constText(team.graduation_target)
+    || (firstSeekingItem ? `resolve: ${firstSeekingItem}` : "");
+  const inboundEdges = ctx?.inBy?.get(team.record_id) || [];
+  const outboundEdges = ctx?.outBy?.get(team.record_id) || [];
+  const currentRole = constText(team.now || team.focus || team.traction);
+  const sourceProof = `
+    ${constMiniListHtml("traction", team.traction, "none listed", 1)}
+    ${constMiniListHtml("shipping", team.prior_shipping, "none listed", 3)}
+    ${constMiniListHtml("research", team.paper_basis, "none listed", 3)}`;
+  const transcriptCues = constTranscriptCueListHtml(constTranscriptCuesForTeam(team), "source cues");
+  const marketFitBody = assessed
+    ? journeyDetailSection(team)
+    : `<p class="ac-inspector-note">No explicit PMF journey read yet. Use the relationship and profile evidence above first.</p>`;
+  const marketFitSection = ctx?.mode === "stack" ? "" : constInspectorDetailsHtml("PMF evidence", marketFitBody);
+  const sourceProofDetails = ctx?.mode === "stack" ? "" : constInspectorDetailsHtml("source proof", sourceProof);
+  const currentBetRows = [
+    ["live bet", liveBet],
+    ["uncertainty", uncertainty],
+    ["next test", nextTest],
+  ].filter(([, value]) => constText(value));
+  const currentBetSection = currentBetRows.length ? constInspectorDetailsHtml("current bet", `
+      <dl class="ac-bet-list">
+        ${currentBetRows.map(([label, value]) => `<div><dt>${escHtml(label)}</dt><dd>${escHtml(constShortText(value, 180))}</dd></div>`).join("")}
+      </dl>
+      ${constTeamOperatingHtml(team)}`) : "";
+  const relationshipDetails = (inboundEdges.length || outboundEdges.length) ? constInspectorDetailsHtml("relationship lines", `
+    <div class="ac-inspector-network">
+      ${outboundEdges.length ? `<div><span>this team points to</span>${outboundEdges.slice(0, 5).map(e => constRelationshipChipHtml(e, ctx, team.record_id)).join("")}</div>` : ""}
+      ${inboundEdges.length ? `<div><span>teams pointing here</span>${inboundEdges.slice(0, 5).map(e => constRelationshipChipHtml(e, ctx, team.record_id)).join("")}</div>` : ""}
+    </div>`) : "";
+  return `
+    <div class="ac-inspector-hero" data-const-team="${escAttr(team.record_id)}">
+      <div class="ac-inspector-kicker">selected team</div>
+      <h3><button type="button" class="ac-inspector-name-link" data-const-open-record="${escAttr(team.record_id)}">${escHtml(team.name || team.record_id)}</button></h3>
+      <p>${escHtml(constShortText(currentRole, 150) || "No current focus in profile.")}</p>
+      <div class="ac-inspector-pills">
+        <span>${escHtml(CONST_DOMAIN_LABEL[constDomainClass(team.domain)] || "other")}</span>
+        ${success.map(s => `<span>${escHtml(s)}</span>`).join("")}
+      </div>
+    </div>
+    ${constStackPlacementHtml(team, ctx)}
+    ${constTeamActionCardHtml(team, ctx)}
+    ${constTeamPeopleHtml(team, ctx)}
+    ${relationshipDetails}
+    ${currentBetSection}
+    ${marketFitSection}
+    ${transcriptCues}
+    ${sourceProofDetails}`;
+}
+
+function constEdgeInspectorHtml(edge, ctx) {
+  const canonical = ctx?.edgeByPair?.get(dependencyPairKey(edge?.from, edge?.to)) || edge;
+  const from = ctx?.teamById?.get(canonical?.from);
+  const to = ctx?.teamById?.get(canonical?.to);
+  if (!from || !to) return constellationInspectorDefaultHtml(ctx);
+  const sharedSkills = (from.skill_areas || []).filter(s => (to.skill_areas || []).includes(s));
+  const sourceNeeds = constList(from.seeking).slice(0, 2);
+  const targetOffers = constList(to.offering).slice(0, 2);
+  const meaning = constRelationshipMeaning(canonical);
+  const status = constRelationshipStatus(canonical);
+  const source = constRelationshipSource(canonical);
+  const confidenceLabel = constRelationshipConfidenceLabel(canonical);
+  const nextAction = constText(canonical.next_action);
+  const directionText = constRelationshipDirection(canonical, from.name || from.record_id, to.name || to.record_id);
+  const oneLine = constRelationshipOneLine(canonical, from.name || from.record_id, to.name || to.record_id);
+  const clearAnswer = constEdgeClearAnswer(canonical, from, to, ctx);
+  const fromPeople = constPeopleForTeam(from, ctx).slice(0, 2);
+  const toPeople = constPeopleForTeam(to, ctx).slice(0, 2);
+  const evidenceBody = canonical.normalized
+    ? (canonical.evidence?.length
+      ? `<ul class="ac-inspector-list">${canonical.evidence.slice(0, 5).map(v => `<li>${escHtml(constShortText(v, 150))}</li>`).join("")}</ul>`
+      : `<p class="ac-inspector-empty">no evidence bullets are attached to this relationship record.</p>`)
+    : `<p class="ac-inspector-note">${escHtml(source.note)}</p>`;
+  const transcriptCues = constTranscriptCueListHtml(constTranscriptCuesForEdge(canonical, ctx), "source cues");
+  const contextBody = `
+    <dl class="ac-bet-list">
+      <div><dt>source focus</dt><dd>${escHtml(constShortText(from.focus || from.now || "", 160) || "not stated")}</dd></div>
+      <div><dt>target focus</dt><dd>${escHtml(constShortText(to.focus || to.now || "", 160) || "not stated")}</dd></div>
+      <div><dt>overlap</dt><dd>${sharedSkills.length ? sharedSkills.map(escHtml).join(" · ") : "no shared skills in profiles"}</dd></div>
+    </dl>
+    ${constMiniListHtml(`${from.name || from.record_id} seeks`, sourceNeeds, "none listed", 2)}
+    ${constMiniListHtml(`${to.name || to.record_id} offers`, targetOffers, "none listed", 2)}`;
+  const actionText = nextAction
+    || (canonical.normalized
+      ? "No next action is attached to this relationship record yet."
+      : "Verify this profile mention and convert it into a relationship record if it is real.");
+  return `
+    <div class="ac-inspector-hero is-edge${canonical.normalized ? " is-source-backed" : " is-profile-link"}">
+      <div class="ac-inspector-kicker">${canonical.normalized ? "relationship record" : "profile mention"}</div>
+      <h3>${escHtml(from.name || from.record_id)} → ${escHtml(to.name || to.record_id)}</h3>
+      <p>${escHtml(constShortText(clearAnswer.answer || oneLine, 220))}</p>
+      <div class="ac-inspector-pills">
+        <span>${escHtml(meaning.label)}</span>
+        <span>${escHtml(status.label)}</span>
+        <span>${escHtml(confidenceLabel)}</span>
+      </div>
+    </div>
+    <section class="ac-inspector-section ac-action-card is-line-action">
+      <h4>next action</h4>
+      <p>${escHtml(constShortText(clearAnswer.next || actionText, 220))}</p>
+    </section>
+    <section class="ac-inspector-section is-edge-meaning">
+      <h4>why this matters</h4>
+      <dl class="ac-bet-list">
+        <div><dt>answer</dt><dd>${escHtml(constShortText(clearAnswer.answer || directionText, 240))}</dd></div>
+        <div><dt>basis</dt><dd>${escHtml(constShortText(clearAnswer.why, 220))}</dd></div>
+        <div><dt>caveat</dt><dd>${escHtml(clearAnswer.caveat)}</dd></div>
+      </dl>
+    </section>
+    <section class="ac-inspector-section is-edge-proof">
+      <h4>source trail</h4>
+      <dl class="ac-bet-list ac-edge-meta">
+        <div><dt>source</dt><dd>${escHtml(source.label)}</dd></div>
+        <div><dt>basis</dt><dd>${escHtml(source.note)}</dd></div>
+        ${canonical.normalized ? `<div><dt>source strength</dt><dd>${escHtml(confidenceLabel)}</dd></div>` : ""}
+        ${canonical.updated_at ? `<div><dt>updated</dt><dd>${escHtml(canonical.updated_at)}</dd></div>` : ""}
+      </dl>
+    </section>
+    <section class="ac-inspector-section is-people">
+      <h4>who to talk to</h4>
+      <div class="ac-person-columns">
+        <div><span>${escHtml(from.name || from.record_id)}</span>${fromPeople.length ? fromPeople.map(constPersonChipHtml).join("") : `<p class="ac-inspector-empty">no attached person.</p>`}</div>
+        <div><span>${escHtml(to.name || to.record_id)}</span>${toPeople.length ? toPeople.map(constPersonChipHtml).join("") : `<p class="ac-inspector-empty">no attached person.</p>`}</div>
+      </div>
+    </section>
+    ${constInspectorDetailsHtml("source evidence", evidenceBody, Boolean(canonical.normalized && canonical.evidence?.length))}
+    ${transcriptCues}
+    ${constInspectorDetailsHtml("team context and needs", contextBody)}`;
+}
+
+function constellationInspectorDefaultHtml(ctx) {
+  const breakdown = constRelationshipBreakdown(ctx?.edges || []);
+  const lensSummary = constLensSummaryHtml(ctx);
+  const queueTitle = ctx?.lens === "relies" ? "reliance lines" : (ctx?.lens === "works" ? "collaboration lines" : (ctx?.lens === "substrate" ? "shared-substrate lines" : "relationship lines"));
+  if (ctx?.scope === "people") return constPeopleDefaultHtml(ctx);
+  if (ctx?.mode === "journey") {
+    const journeyTeams = (ctx?.teams || []).filter(t => teamKind(t) !== "person");
+    const journeyPoints = journeyTeams.filter(journeyAssessed).length;
+    const profileContext = Math.max(0, journeyTeams.length - journeyPoints);
+    return `
+      <div class="ac-inspector-hero is-confidence">
+        <div class="ac-inspector-kicker">PMF evidence coverage</div>
+        <h3>${escHtml(String(journeyPoints))}/${escHtml(String(journeyTeams.length))} explicit journey reads</h3>
+        <p>Use this as a coverage view, not a cohort-wide maturity ranking. Profile-context dots mean missing PMF assessment data.</p>
+      </div>
+      <section class="ac-inspector-section is-journey-summary">
+        <h4>visible layers</h4>
+        <div class="ac-view-chips">
+          <span>journey points<em>${escHtml(String(journeyPoints))}</em></span>
+          <span>profile context<em>${escHtml(String(profileContext))}</em></span>
+        </div>
+      </section>`;
+  }
+  if (ctx?.mode === "ring" && !ctx?.interest?.active) {
+    return `
+      ${constMapReadoutHeroHtml(ctx, "circle readout")}
+      ${constCorridorReadoutHtml(ctx)}
+      <section class="ac-inspector-section is-rel-queue">
+        <h4>who should talk next</h4>
+        ${constRelationshipQueueHtml(ctx, { max: 3, compact: true })}
+      </section>
+      ${constDataCoverageHtml(ctx)}`;
+  }
+  if (ctx?.mode === "stack") {
+    return `
+      ${constStackReadoutHtml(ctx)}
+      ${constStackSummaryHtml(ctx)}`;
+  }
+  if (ctx?.interest?.active) {
+    return `
+      ${constInterestSummaryHtml(ctx)}
+      ${lensSummary}
+      <section class="ac-inspector-section is-rel-queue">
+        <h4>${escHtml(queueTitle)}</h4>
+        ${constRelationshipQueueHtml(ctx, { max: 4, compact: true })}
+      </section>`;
+  }
+  if ((ctx?.mode === "map" || ctx?.mode === "ring") && !ctx?.interest?.active) {
+    return `
+      ${constMapReadoutHeroHtml(ctx)}
+      ${constCorridorReadoutHtml(ctx)}
+      <section class="ac-inspector-section is-rel-queue">
+        <h4>who should talk next</h4>
+        ${constRelationshipQueueHtml(ctx, { max: 4, compact: true })}
+      </section>
+      ${constDataCoverageHtml(ctx)}`;
+  }
+  return `
+    ${lensSummary}
+    <section class="ac-inspector-section is-rel-queue">
+      <h4>lines to inspect</h4>
+      ${constRelationshipQueueHtml(ctx, { max: 4, compact: true })}
+      <p class="ac-rel-queue-more">line source: ${escHtml(String(breakdown.typed))} records · ${escHtml(String(breakdown.missing))} profile mentions</p>
+    </section>`;
+}
+
+function constellationInspectorHeaderHtml(selection, ctx) {
+  if (!selection && !ctx?.interest?.active) return "";
+  let kicker = "overview";
+  let title = "select a line, team, or ecosystem";
+  let titleHtml = "";
+  if (selection?.type === "team") {
+    const team = ctx?.teamById?.get(selection.rid);
+    kicker = "selected team";
+    title = team?.name || selection.rid || "team";
+    titleHtml = team?.record_id
+      ? `<button type="button" class="ac-inspector-title-link" data-const-open-record="${escAttr(team.record_id)}">${escHtml(title)}</button>`
+      : escHtml(title);
+  } else if (selection?.type === "person") {
+    const person = ctx?.personById?.get(selection.rid);
+    kicker = "selected person";
+    title = constPersonDisplayName(person) || selection.rid || "person";
+    titleHtml = person?.record_id
+      ? `<button type="button" class="ac-inspector-title-link" data-const-open-record="${escAttr(person.record_id)}">${escHtml(title)}</button>`
+      : escHtml(title);
+  } else if (selection?.type === "edge") {
+    const from = ctx?.teamById?.get(selection.from)?.name || selection.from || "source";
+    const to = ctx?.teamById?.get(selection.to)?.name || selection.to || "target";
+    kicker = "selected line";
+    title = `${from} → ${to}`;
+  } else if (ctx?.interest?.active) {
+    kicker = "ecosystem focus";
+    title = constClusterLabel(ctx.interest.cluster);
+  }
+  if (!titleHtml) titleHtml = escHtml(title);
+  return `
+    <div class="ac-inspector-status">
+      <span>${escHtml(kicker)}</span>
+      <strong>${titleHtml}</strong>
+    </div>
+    ${selection ? `<button type="button" class="ac-inspector-clear" data-const-clear-selection aria-label="Clear selected constellation item">×</button>` : ""}`;
+}
+
+function constellationInspectorLeadHtml(ctx, selection = null) {
+  if (ctx?.mode === "map" && !selection && ctx?.interest?.active && ctx?.distributionWells?.length) {
+    return constMapDistributionHtml(ctx.distributionWells, new Map(), ctx?.interest?.id || "all");
+  }
+  return "";
+}
+
+function constellationInspectorShell(ctx, selection = state.constSelection) {
+  const header = constellationInspectorHeaderHtml(selection, ctx);
+  return `
+    <aside class="ac-inspector" aria-label="constellation context">
+      ${header ? `<div class="ac-inspector-head">${header}</div>` : ""}
+      <div class="ac-inspector-body">${constellationInspectorLeadHtml(ctx, selection)}${constellationInspectorHtml(selection, ctx)}</div>
+    </aside>`;
+}
+
+function constellationInspectorHtml(selection, ctx) {
+  if (selection?.type === "team") return constTeamInspectorHtml(ctx?.teamById?.get(selection.rid), ctx);
+  if (selection?.type === "person") return constPersonInspectorHtml(ctx?.personById?.get(selection.rid), ctx);
+  if (selection?.type === "edge") return constEdgeInspectorHtml(selection, ctx);
+  return constellationInspectorDefaultHtml(ctx);
+}
+
 function renderJourney() {
-  const all = state.cohort.teams || [];
+  const cohort = activeConstellationCohort();
+  const all = cohort.teams || [];
   // Filters (persist for the session). side = include the off-track stage-0
   // "side project" column; bottleneck = isolate one bottleneck.
   const jf = state.journeyFilters || (state.journeyFilters = { teams: true, projects: true, side: true, bottleneck: null });
@@ -1186,9 +4215,9 @@ function renderJourney() {
   // Stage distribution over the filtered set (drives the per-column counts).
   const stageCounts = new Array(9).fill(0);
   for (const t of teams) stageCounts[journeyFor(t).stage]++;
-  const W = 980, H = 540;
+  const W = 1120, H = 560;
   // Plot area inset: leave room for axis labels (left = evidence, bottom = stage).
-  const PAD_L = 96, PAD_R = 28, PAD_T = 28, PAD_B = 88;
+  const PAD_L = 178, PAD_R = 30, PAD_T = 30, PAD_B = 106;
   const plotW = W - PAD_L - PAD_R;
   const plotH = H - PAD_T - PAD_B;
   // X = stage. Column 0 is "side project" — OFF the main maturity track,
@@ -1213,92 +4242,194 @@ function renderJourney() {
   // Divider between the off-track side-project column (0) and idea (1).
   const dividerX = PAD_L + colW;
   gridLines.push(`<line class="ac-jdivider" x1="${dividerX.toFixed(1)}" y1="${(PAD_T - 6).toFixed(1)}" x2="${dividerX.toFixed(1)}" y2="${(PAD_T + plotH + 6).toFixed(1)}"/>`);
+  const stageAxisLines = [
+    ["side", "project"],
+    ["1", "idea"],
+    ["2", "problem", "discovery"],
+    ["3", "problem-", "solution fit"],
+    ["4", "product", "validation"],
+    ["5", "scaling", "traction"],
+    ["6", "emerging", "pmf"],
+    ["7", "strong", "pmf"],
+    ["8", "scale", "fit"],
+  ];
   const xLabels = JOURNEY_STAGE_LABELS.map((lbl, stage) => {
     const x = xForStage(stage);
-    // Stage 0 (side project) is off-track — render the label only, no number.
-    const num = stage === 0 ? "" : `<tspan class="ac-jaxis-num">${stage}</tspan> `;
     const cls = stage === 0 ? "ac-jaxis-x ac-jaxis-x-side" : "ac-jaxis-x";
-    return `<text class="${cls}" x="${x.toFixed(1)}" y="${(PAD_T + plotH + 18).toFixed(1)}" text-anchor="middle">${num}${escHtml(lbl)}</text>`;
+    const lines = stageAxisLines[stage] || [String(stage), lbl];
+    const tspans = lines.map((line, i) => {
+      const numCls = stage > 0 && i === 0 ? ` class="ac-jaxis-num"` : "";
+      const dy = i === 0 ? "0" : "11";
+      return `<tspan${numCls} x="${x.toFixed(1)}" dy="${dy}">${escHtml(line)}</tspan>`;
+    }).join("");
+    return `<text class="${cls}" x="${x.toFixed(1)}" y="${(PAD_T + plotH + 18).toFixed(1)}" text-anchor="middle">${tspans}</text>`;
   }).join("");
+  const evidenceAxisLines = [
+    [],
+    ["vibes / thesis"],
+    ["interviews"],
+    ["pilots / LOIs", "design partners"],
+    ["usage / revenue", "retention"],
+    ["repeatable pull"],
+  ];
   const yLabels = JOURNEY_EVIDENCE_LABELS.slice(1).map((lbl, i) => {
     const ev = i + 1;
     const y = yForEvidence(ev);
-    return `<text class="ac-jaxis-y" x="${(PAD_L - 10).toFixed(1)}" y="${(y + 3).toFixed(1)}" text-anchor="end"><tspan class="ac-jaxis-num">${ev}</tspan> ${escHtml(lbl)}</text>`;
+    const lines = evidenceAxisLines[ev] || [lbl];
+    const baseY = y + 3 - (lines.length - 1) * 5;
+    const tspans = lines.map((line, lineIdx) => {
+      const prefix = lineIdx === 0 ? `<tspan class="ac-jaxis-num">${ev}</tspan> ` : "";
+      const dy = lineIdx === 0 ? "0" : "10";
+      return `<tspan x="${(PAD_L - 14).toFixed(1)}" dy="${dy}">${prefix}${escHtml(line)}</tspan>`;
+    }).join("");
+    return `<text class="ac-jaxis-y" x="${(PAD_L - 14).toFixed(1)}" y="${baseY.toFixed(1)}" text-anchor="end">${tspans}</text>`;
   }).join("");
   const axisTitleX = `<text class="ac-jaxis-title" x="${(PAD_L + plotW / 2).toFixed(1)}" y="${(H - 16).toFixed(1)}" text-anchor="middle">stage →</text>`;
   const axisTitleY = `<text class="ac-jaxis-title" transform="translate(18,${(PAD_T + plotH / 2).toFixed(1)}) rotate(-90)" text-anchor="middle">evidence quality →</text>`;
-  // Per-stage count strip across the top — a quick distribution read.
-  const countLabels = stageCounts.map((c, stage) =>
-    c > 0 ? `<text class="ac-jcount" x="${xForStage(stage).toFixed(1)}" y="${(PAD_T - 7).toFixed(1)}" text-anchor="middle">${c}</text>` : ""
-  ).join("");
+  // #226 journey-assessed set — declaration dropped during the mega-merge; restored.
+  const assessedTeams = teams.filter(t => journeyAssessed(t));
+  const assessedShown = assessedTeams.length;
+  const cellBuckets = new Map();
+  for (const t of teams) {
+    const j = journeyFor(t);
+    const key = `${j.stage}:${j.evidence_quality}`;
+    if (!cellBuckets.has(key)) cellBuckets.set(key, []);
+    cellBuckets.get(key).push(t);
+  }
+  for (const bucket of cellBuckets.values()) {
+    bucket.sort((a, b) => constText(a.name || a.record_id).localeCompare(constText(b.name || b.record_id)));
+  }
 
-  // ── dots: one per team AND project. Radius ← market_upside; fill ←
-  // primary_bottleneck. Deterministic jitter spreads same-cell dots. ──
+  // ── dots: one per visible team/project. Explicit journey reads use
+  // bottleneck color + upside size; default/profile records stay quieter but
+  // remain individually selectable.
   const dots = teams.map((t) => {
     const j = journeyFor(t);
-    const jx = journeyJitter(t.record_id, "x") * (colW * 0.32);
-    const jy = journeyJitter(t.record_id, "y") * (rowH * 0.32);
+    const bucket = cellBuckets.get(`${j.stage}:${j.evidence_quality}`) || [t];
+    const n = bucket.length;
+    const idx = Math.max(0, bucket.findIndex(item => item.record_id === t.record_id));
+    let jx = journeyJitter(t.record_id, "x") * (colW * 0.18);
+    let jy = journeyJitter(t.record_id, "y") * (rowH * 0.18);
+    if (n > 1) {
+      const cols = Math.ceil(Math.sqrt(n));
+      const rows = Math.ceil(n / cols);
+      const col = idx % cols;
+      const row = Math.floor(idx / cols);
+      jx = (cols <= 1 ? 0 : ((col / (cols - 1)) - 0.5) * (colW * 0.66)) + journeyJitter(t.record_id, "x") * 2;
+      jy = (rows <= 1 ? 0 : ((row / (rows - 1)) - 0.5) * (rowH * 0.56)) + journeyJitter(t.record_id, "y") * 2;
+    }
     const cx = xForStage(j.stage) + jx;
     const cy = yForEvidence(j.evidence_quality) + jy;
-    const r = 4 + j.market_upside * 1.8; // upside 1..5 → r 5.8..13
-    const colorIdx = Math.max(0, JOURNEY_BOTTLENECKS.indexOf(j.primary_bottleneck));
+    const assessed = journeyAssessed(t);
+    const r = assessed ? 4 + j.market_upside * 1.8 : 4.8; // upside 1..5 -> r 5.8..13
+    const famIdx = journeyFamilyIdx(j.primary_bottleneck);
     const isProject = teamKind(t) === "project";
-    return `<g class="ac-jnode${isProject ? " is-project" : ""}" data-record-id="${escHtml(t.record_id)}" transform="translate(${cx.toFixed(1)},${cy.toFixed(1)})">
-        <circle class="ac-jdot ac-jdot-b${colorIdx}" r="${r.toFixed(1)}"/>
-        <text class="ac-jnode-label" y="${(-r - 5).toFixed(1)}" text-anchor="middle">${escHtml(t.name)}</text>
+    const labelClass = assessed && assessedShown <= 6 ? " is-labeled" : "";
+    const contextClass = assessed ? "" : " is-profile-context";
+    const dotClass = assessed ? `ac-jdot ac-jfam-${famIdx}` : "ac-jdot ac-jprofile-dot";
+    const title = assessed
+      ? `${t.name || t.record_id}: ${JOURNEY_STAGE_LABELS[j.stage] || "journey"} / ${JOURNEY_EVIDENCE_LABELS[j.evidence_quality] || "evidence"}`
+      : `${t.name || t.record_id}: profile context; no explicit journey read yet`;
+    return `<g class="ac-jnode${isProject ? " is-project" : ""}${contextClass}${labelClass}" data-record-id="${escHtml(t.record_id)}" role="button" tabindex="0" aria-label="${escAttr(`inspect ${t.name || t.record_id} journey`)}" transform="translate(${cx.toFixed(1)},${cy.toFixed(1)})">
+        <title>${escHtml(title)}</title>
+        <circle class="ac-jhit" r="${Math.max(18, r + 9).toFixed(1)}"/>
+        <circle class="${dotClass}" r="${r.toFixed(1)}"/>
+        <text class="ac-jnode-label" y="${(-r - 8).toFixed(1)}" text-anchor="middle">${escHtml(t.name)}</text>
       </g>`;
   }).join("");
 
-  // ── bottleneck legend (10 colors) — clickable to isolate a bottleneck ──
-  const legend = JOURNEY_BOTTLENECKS.map((b, i) =>
-    `<button type="button" class="acl-item acl-jbtn ${jf.bottleneck === b ? "is-active" : ""} ${jf.bottleneck && jf.bottleneck !== b ? "is-dim" : ""}" data-jbottleneck="${escAttr(b)}"><span class="acl-jswatch ac-jdot-b${i}"></span>${escHtml(b)}</button>`
-  ).join("");
+  // ── bottleneck legend — grouped into 4 color families (the dot palette),
+  // each family's members still individually clickable to isolate that one. ──
+  const legend = JOURNEY_BOTTLENECK_FAMILIES.map((fam, fi) => `
+    <div class="acl-jfamily">
+      <span class="acl-jfam-head"><span class="acl-jswatch ac-jfam-${fi}"></span>${escHtml(fam.label)}</span>
+      ${fam.members.map(b =>
+        `<button type="button" class="acl-jbtn ${jf.bottleneck === b ? "is-active" : ""} ${jf.bottleneck && jf.bottleneck !== b ? "is-dim" : ""}" data-jbottleneck="${escAttr(b)}">${escHtml(b)}</button>`
+      ).join("")}
+    </div>`).join("");
 
   // ── filter bar — toggle teams / projects / side projects ──
   const fbtn = (key, label) => `<button type="button" class="ajf-toggle ${jf[key] ? "is-on" : ""}" data-jfilter="${key}">${label}</button>`;
   const filterBar = `
     <div class="alch-journey-filters">
-      <span class="ajf-label">show</span>
+      <span class="ajf-label">include</span>
       ${fbtn("teams", "teams")}
       ${fbtn("projects", "projects")}
       ${fbtn("side", "side projects")}
-      <span class="ajf-count">${teams.length} shown</span>
     </div>`;
 
   state.canvas.innerHTML = `
     <div class="alch-constellation">
       <nav class="alch-const-modes" role="tablist" aria-label="constellation view">
         <button class="alch-const-mode-btn" data-const-mode="clusters" aria-selected="false" type="button">
-          <span class="acm-glyph" aria-hidden="true">◑</span><span class="acm-label">clusters</span>
+          <span class="acm-glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"/><path d="M20.2 20.2c2.04-2.03.02-7.36-4.5-11.9-4.54-4.52-9.87-6.54-11.9-4.5-2.04 2.03-.02 7.36 4.5 11.9 4.54 4.52 9.87 6.54 11.9 4.5Z"/><path d="M15.7 15.7c4.52-4.54 6.54-9.87 4.5-11.9-2.03-2.04-7.36-.02-11.9 4.5-4.52 4.54-6.54 9.87-4.5 11.9 2.03 2.04 7.36.02 11.9-4.5Z"/></svg></span><span class="acm-label">clusters</span>
           <span class="acm-hint">shared cluster membership</span>
         </button>
         <button class="alch-const-mode-btn" data-const-mode="dependencies" aria-selected="false" type="button">
-          <span class="acm-glyph" aria-hidden="true">↬</span><span class="acm-label">dependencies</span>
+          <span class="acm-glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8.3 10a.7.7 0 0 1-.626-1.079L11.4 3a.7.7 0 0 1 1.198-.043L16.3 8.9a.7.7 0 0 1-.572 1.1Z"/><rect x="3" y="14" width="7" height="7" rx="1"/><circle cx="17.5" cy="17.5" r="3.5"/></svg></span><span class="acm-label">dependencies</span>
           <span class="acm-hint">team-asserted edges</span>
         </button>
         <button class="alch-const-mode-btn" data-const-mode="journey" aria-selected="true" type="button">
-          <span class="acm-glyph" aria-hidden="true">⌁</span><span class="acm-label">journey</span>
+          <span class="acm-glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.106 5.553a2 2 0 0 0 1.788 0l3.659-1.83A1 1 0 0 1 21 4.619v12.764a1 1 0 0 1-.553.894l-4.553 2.277a2 2 0 0 1-1.788 0l-4.212-2.106a2 2 0 0 0-1.788 0l-3.659 1.83A1 1 0 0 1 3 19.381V6.618a1 1 0 0 1 .553-.894l4.553-2.277a2 2 0 0 1 1.788 0z"/><path d="M15 5.764v15"/><path d="M9 3.236v15"/></svg></span><span class="acm-label">journey</span>
           <span class="acm-hint">pmf maturity spectrum</span>
         </button>
       </nav>
       ${filterBar}
-      <div class="alch-constellation-stage alch-journey-stage">
-        <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">
-          ${gridLines.join("")}
-          ${xLabels}
-          ${yLabels}
-          ${axisTitleX}
-          ${axisTitleY}
-          ${countLabels}
-          ${dots}
-        </svg>
-        <div class="alch-journey-tip" hidden></div>
+      <div class="alch-const-workbench is-single">
+        <div class="alch-const-main">
+          ${constJourneyReadoutHtml(teams, all)}
+          <div class="alch-constellation-legend">${legend}</div>
+          <div class="alch-constellation-stage alch-journey-stage">
+            <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">
+              ${gridLines.join("")}
+              ${xLabels}
+              ${yLabels}
+              ${axisTitleX}
+              ${axisTitleY}
+              ${dots}
+            </svg>
+            <div class="ac-tip" hidden></div>
+          </div>
+        </div>
       </div>
-      <div class="alch-constellation-legend">${legend}</div>
-      <p class="alch-callout"><strong>journey · v0.1</strong><br/>
-      Every cohort team and project placed on a startup-maturity spectrum — <strong>stage</strong> (idea → scale fit) across, <strong>evidence quality</strong> (vibes → repeatable pull) up. Dot size is market upside; dot color is the primary bottleneck. Initial placement defaults every company to <em>idea / vibes</em> — update each as evidence is collected, via <strong>profile → edit → team / project</strong>.</p>
     </div>
   `;
+}
+
+function renderProductStack() {
+  const teams = state.cohort.teams || [];
+  const clusters = state.cohort.clusters || [];
+  const teamById = new Map(teams.filter(t => t?.record_id).map(t => [t.record_id, t]));
+  const edges = constellationDependencyEdges(teams, teamById, state.cohort?.dependencies || [])
+    .filter(e => teamById.has(e.from) && teamById.has(e.to));
+  const baseCtx = {
+    ...constellationInspectorContext(teams, edges, state.cohort?.people || []),
+    clusters,
+    mode: "stack",
+    lens: "all",
+    interest: constInterestContext(teams, clusters, edges, state.constInterest),
+  };
+  const stackModel = constProductStackModel(teams, baseCtx);
+  const inspectorCtx = { ...baseCtx, stackModel };
+  const legend = CONST_DOMAIN_KEYS
+    .map(k => `<span class="acl-item"><span class="acl-dot acl-dot-${k}"></span>${escHtml(CONST_DOMAIN_LABEL[k])}</span>`)
+    .join("");
+  state.canvas.innerHTML = `
+    <div class="alch-constellation" data-constellation-view="stack">
+      <div class="alch-const-topbar">${constellationNav("stack")}</div>
+      <div class="alch-const-workbench is-single">
+        <div class="alch-const-main">
+          ${constStackReadoutHtml(inspectorCtx)}
+          <div class="alch-constellation-legend">${legend}</div>
+          <div class="alch-constellation-stage ac-stack-stage" data-view="stack" data-lens="all" tabindex="0" aria-label="constellation product layer directory">
+            ${constProductStackHtml(stackModel)}
+            <div class="ac-tip" hidden></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+  markConstellationSelection(state.constSelection);
 }
 
 // ─── constellation ───────────────────────────────────────────────────
@@ -1314,16 +4445,39 @@ const CONST_DOMAIN_LABEL = {
   "app-ux": "app · ux", "bd-gtm": "app · ux", other: "other",
 };
 const CONST_DOMAIN_KEYS = ["tee", "ai", "crypto", "app-ux"];
+const CONST_DOMAIN_COLORS = {
+  tee: "#C0492E",
+  ai: "#D9913D",
+  crypto: "#9A5BA6",
+  "app-ux": "#3F9B8E",
+  other: "#8a7d75",
+};
 function constDomainClass(d) {
   const k = String(d || "other").toLowerCase();
   if (k === "bd-gtm") return "app-ux";
   return CONST_DOMAIN_KEYS.includes(k) ? k : "other";
 }
+// Node color is ALWAYS domain — one coding across every lens, so a team never
+// changes color when you switch lenses. Cluster identity is carried by the
+// WELL (position + label), never by node color. This is why
+// there is no per-cluster color palette here.
+
+function constArcPoint(cx, cy, r, angle) {
+  return { x: cx + Math.cos(angle) * r, y: cy + Math.sin(angle) * r };
+}
+
+function constArcPath(cx, cy, r, startAngle, endAngle) {
+  const start = constArcPoint(cx, cy, r, startAngle);
+  const end = constArcPoint(cx, cy, r, endAngle);
+  const large = Math.abs(endAngle - startAngle) > Math.PI ? 1 : 0;
+  return `M ${start.x.toFixed(1)} ${start.y.toFixed(1)} A ${r.toFixed(1)} ${r.toFixed(1)} 0 ${large} 1 ${end.x.toFixed(1)} ${end.y.toFixed(1)}`;
+}
 
 // Lay wells out on an adaptive grid (favoring more columns on the wide
 // canvas) so they never overlap regardless of cluster count, then place
 // each well's teams: keystone (highest in-degree) at the centre, the rest
-// on a ring inside the well.
+// on a ring inside the well. Wells are equal circles; size is not allowed to
+// imply project importance because the source model does not provide that.
 function placeConstellation(model, W, H) {
   const cl = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
   const N = Math.max(1, model.wellsDef.length);
@@ -1339,172 +4493,739 @@ function placeConstellation(model, W, H) {
     const rowPad = (cols - rowCount) * cellW / 2;
     const cx = rowPad + col * cellW + cellW / 2;
     const cy = row * cellH + cellH / 2;
-    const rx = cellW * 0.42, ry = cellH * 0.40;
-    wells.push({ id: w.id, label: w.label, cx, cy, rx, ry });
+    const wellR = Math.max(58, Math.min(cellW, cellH) * 0.42);
+    const nodeLabelGuardY = cy - wellR + Math.min(48, wellR * 0.42);
+    wells.push({ id: w.id, label: w.label, members: w.members, cx, cy, r: wellR });
     const ordered = w.members.slice().sort((a, b) => (model.indegree.get(b) || 0) - (model.indegree.get(a) || 0));
     const ringN = Math.max(1, ordered.length - 1);
     ordered.forEach((rid, k) => {
       const team = model.byRecordId.get(rid);
       const deg = model.indegree.get(rid) || 0;
       const r = 6 + Math.min(deg, 8) * 1.5;
-      let x = cx, y = cy + (ordered.length > 1 ? -ry * 0.1 : 0);
+      let angle = null;
+      let x = cx, y = cy + (ordered.length > 1 ? -wellR * 0.08 : 0);
       if (k > 0) {
         const a = -Math.PI / 2 + ((k - 1) / ringN) * Math.PI * 2;
-        const spread = ringN > 5 && (k % 2 === 0) ? 0.92 : 0.66;
-        x = cl(cx + Math.cos(a) * rx * spread, r + 4, W - r - 4);
-        y = cl(cy + Math.sin(a) * ry * spread, r + 12, H - r - 12);
+        angle = a;
+        const spread = ringN > 5 ? (k % 2 === 0 ? 0.72 : 0.56) : (ringN >= 3 ? 0.74 : 0.56);
+        x = cl(cx + Math.cos(a) * wellR * spread, r + 4, W - r - 4);
+        y = cl(cy + Math.sin(a) * wellR * spread, r + 12, H - r - 12);
       }
-      pos.set(rid, { team, x, y, r, deg });
+      if (ordered.length > 1 && y - r < nodeLabelGuardY) {
+        y = Math.min(cy + wellR - r - 12, nodeLabelGuardY + r);
+      }
+      pos.set(rid, { team, x, y, r, deg, angle, wellId: w.id, wellSize: ordered.length, rank: k });
     });
   });
-  return { wells, pos };
+  return { wells, ringSegments: [], pos };
 }
 
-// The original single-ring layout, kept as a toggle alongside the wells.
-// Teams are ordered cluster-by-cluster so each cluster reads as an arc;
-// node size + domain colour match the wells view. No well backdrops.
-function placeConstellationCircle(model, W, H) {
-  const CX = W / 2, CY = H / 2, R = Math.min(W, H) * 0.4;
-  const order = [];
-  for (const w of model.wellsDef) for (const rid of w.members) order.push(rid);
-  const n = order.length || 1;
+function placeConstellationRing(model, W, H) {
+  const CX = W / 2;
+  const CY = H / 2;
+  const ringR = Math.min(W, H) * 0.40;
+  const labelR = ringR + 46;
+  const ordered = [];
+  for (const well of model.wellsDef) {
+    const members = well.members
+      .slice()
+      .sort((a, b) => String(model.byRecordId.get(a)?.name || a).localeCompare(String(model.byRecordId.get(b)?.name || b)));
+    for (const rid of members) ordered.push({ rid, well });
+  }
+  const n = Math.max(1, ordered.length);
   const pos = new Map();
-  order.forEach((rid, i) => {
+  ordered.forEach(({ rid, well }, i) => {
     const team = model.byRecordId.get(rid);
     if (!team) return;
     const deg = model.indegree.get(rid) || 0;
     const r = 6 + Math.min(deg, 8) * 1.5;
-    const ang = -Math.PI / 2 + (i / n) * Math.PI * 2;
-    pos.set(rid, { team, x: CX + Math.cos(ang) * R, y: CY + Math.sin(ang) * R, r, deg });
+    const angle = -Math.PI / 2 + (i / n) * Math.PI * 2;
+    const point = constArcPoint(CX, CY, ringR, angle);
+    pos.set(rid, { team, x: point.x, y: point.y, r, deg, angle, wellId: well.id, wellSize: well.members.length });
   });
-  return { wells: [], pos };
+  let cursor = 0;
+  const ringSegments = model.wellsDef.map((well) => {
+    const count = well.members.length;
+    const start = -Math.PI / 2 + (cursor / n) * Math.PI * 2;
+    const end = -Math.PI / 2 + ((cursor + count) / n) * Math.PI * 2;
+    cursor += count;
+    const mid = (start + end) / 2;
+    const label = constArcPoint(CX, CY, labelR, mid);
+    return {
+      id: well.id,
+      label: well.label,
+      members: well.members,
+      cx: label.x,
+      cy: label.y,
+      start,
+      end,
+      mid,
+      path: constArcPath(CX, CY, ringR + 24, start + 0.012, end - 0.012),
+    };
+  });
+  return { wells: [], ringSegments, pos, ringCenter: { x: CX, y: CY } };
 }
 
-// Watered-down "read" surfaced on hover — public self-asserted fields only
-// (name · domain · how many depend on it · the team's own focus/now).
-function constFrameLine(team, deg) {
+// Lightweight hover label. The fixed inspector is the evidence surface; hover
+// only identifies the mark and tells the user why the circle size changed.
+function constNodeTipHTML(team, deg, outBy, inBy, clusterLabels, sourceStats = {}) {
   const dom = CONST_DOMAIN_LABEL[constDomainClass(team.domain)] || "other";
-  const depWord = deg === 1 ? "team depends on this" : "teams depend on this";
-  const frame = team.focus || team.now || "";
-  return `<strong>${escHtml(team.name || team.record_id)}</strong> · ${escHtml(dom)} · ${deg} ${depWord}`
-    + (frame ? `<br/>${escHtml(frame)}` : "");
+  const outboundLinks = outBy?.get(team.record_id) || [];
+  const inboundLinks = inBy?.get(team.record_id) || [];
+  const row = (k, v) => `<div class="ajt-row"><span class="ajt-k">${k}</span><span class="ajt-v">${v}</span></div>`;
+  let html = `<div class="ajt-name">${escHtml(team.name || team.record_id)}</div>`;
+  html += row("domain", escHtml(dom));
+  const cls = clusterLabels && clusterLabels.length ? clusterLabels : null;
+  if (cls) html += row("clusters", cls.map(escHtml).join(" · "));
+  html += row("lines", `${escHtml(String(outboundLinks.length))} out · ${escHtml(String(inboundLinks.length))} in`);
+  html += row("source", `${escHtml(String(sourceStats.typed || 0))} records · ${escHtml(String(sourceStats.profile || 0))} mentions`);
+  html += row("size", `${escHtml(String(deg))} incoming declared line${deg === 1 ? "" : "s"}`);
+  html += row("action", "click to pin evidence");
+  return html;
 }
 
-function renderConstellation() {
-  const teams = state.cohort.teams;
-  const clusters = state.cohort.clusters;
-  const mode = state.constellationMode || "clusters";
+function constPersonTipHTML(person, model, ctx) {
+  const team = ctx?.teamById?.get(person?.team);
+  const secondary = (Array.isArray(person?.secondary_teams) ? person.secondary_teams : [])
+    .map(id => ctx?.teamById?.get(id)?.name || id)
+    .filter(Boolean);
+  const goto = constList(person?.go_to_them_for).slice(0, 2).join(" · ");
+  const linkCount = (model?.edges || []).filter(edge => edge.a === person?.record_id || edge.b === person?.record_id || edge.person === person?.record_id).length;
+  const row = (k, v) => `<div class="ajt-row"><span class="ajt-k">${k}</span><span class="ajt-v">${v}</span></div>`;
+  let html = `<div class="ajt-name">${escHtml(constPersonDisplayName(person))}</div>`;
+  html += row("role", escHtml(constPersonRoleLabel(person)));
+  html += row("project", escHtml(team?.name || person?.team || "not attached"));
+  if (secondary.length) html += row("also", escHtml(secondary.slice(0, 2).join(" · ")));
+  if (goto) html += row("go to for", escHtml(goto));
+  html += row("links", `${escHtml(String(linkCount))} visible people link${linkCount === 1 ? "" : "s"}`);
+  html += row("source", "person profile");
+  html += row("action", "click to pin person");
+  return html;
+}
 
-  // Journey sub-tab renders a PMF scatterplot instead of the map.
-  if (mode === "journey") { renderJourney(); return; }
+function renderConstellationPeople(teams, people, clusters, edges) {
+  const W = 1120, H = 620;
+  const model = constPeopleNetworkModel(people, teams, W, H);
+  const inspectorCtx = {
+    ...constellationInspectorContext(teams, edges, people),
+    clusters,
+    mode: "map",
+    scope: "people",
+    peopleModel: model,
+    distributionWells: [],
+    lens: "all",
+    interest: { active: false },
+  };
+  const groupMarkup = model.groups.map((group, idx) => {
+    const domain = constDomainClass(group.team?.domain || group.people?.[0]?.domain);
+    const label = group.label || "people";
+    const count = group.people?.length || 0;
+    const accent = constWellAccentStyle(constWellAccentTokens(group.id, idx));
+    const actionAttrs = group.team?.record_id
+      ? `data-const-team="${escAttr(group.team.record_id)}" role="button" tabindex="0" aria-label="${escAttr(`inspect ${label}`)}"`
+      : `aria-hidden="true"`;
+    return `
+      <g class="ac-person-well ac-person-well-domain-${escAttr(domain)}${group.kind === "unattached" ? " is-unattached" : ""}" data-people-group="${escAttr(group.id)}" style="${escAttr(accent)}" ${actionAttrs}>
+        <circle class="ac-person-well-shape" cx="${group.cx.toFixed(1)}" cy="${group.cy.toFixed(1)}" r="${group.r.toFixed(1)}"/>
+        <text class="ac-person-well-label" x="${group.cx.toFixed(1)}" y="${Math.max(14, group.cy - group.r - 12).toFixed(1)}">${escHtml(label)}</text>
+        <text class="ac-person-well-count" x="${group.cx.toFixed(1)}" y="${(group.cy + group.r + 16).toFixed(1)}">${escHtml(String(count))} people</text>
+      </g>`;
+  }).join("");
+  const edgeMarkup = model.edges.map(edge => {
+    const dx = edge.x2 - edge.x1;
+    const dy = edge.y2 - edge.y1;
+    const dist = Math.hypot(dx, dy) || 1;
+    const bend = Math.min(34, Math.max(8, dist * 0.08));
+    const qx = (edge.x1 + edge.x2) / 2 - (dy / dist) * bend;
+    const qy = (edge.y1 + edge.y2) / 2 + (dx / dist) * bend;
+    const d = `M ${edge.x1.toFixed(1)} ${edge.y1.toFixed(1)} Q ${qx.toFixed(1)} ${qy.toFixed(1)} ${edge.x2.toFixed(1)} ${edge.y2.toFixed(1)}`;
+    return `<path class="ac-person-link is-${escAttr(dependencySafeToken(edge.kind))}" data-person-a="${escAttr(edge.a)}" data-person-b="${escAttr(edge.b)}" data-link-kind="${escAttr(edge.kind)}" aria-hidden="true" d="${escAttr(d)}"/>`;
+  }).join("");
+  const peopleMarkup = [...model.personPositions.values()].map(pos => {
+    const person = pos.person;
+    const domain = constDomainClass(person.domain || inspectorCtx.teamById.get(person.team)?.domain);
+    const roleClass = dependencySafeToken(person.role_class || "unknown");
+    const name = constPersonDisplayName(person);
+    const secondaryTeams = Array.isArray(person.secondary_teams) ? person.secondary_teams.join(" ") : "";
+    return `
+      <g class="ac-person-node ac-person-domain-${escAttr(domain)} ac-person-role-${escAttr(roleClass)}" data-person-id="${escAttr(person.record_id)}" data-person-team="${escAttr(person.team || "")}" data-person-secondary-teams="${escAttr(secondaryTeams)}" role="button" tabindex="0" aria-label="${escAttr(`inspect ${name}`)}" transform="translate(${pos.x.toFixed(1)},${pos.y.toFixed(1)})">
+        <circle class="ac-person-hit" r="15"/>
+        <circle class="ac-person-dot" r="${roleClass === "coordinator" ? "7.4" : "6.4"}"/>
+        <text class="ac-person-initial" y="2.6" text-anchor="middle">${escHtml(constPersonInitials(person))}</text>
+      </g>`;
+  }).join("");
+  const legend = `
+    <div class="acl-line-key">
+      <strong>People links</strong>
+      <span class="acl-line-key-row is-typed"><i></i><b>same project</b></span>
+      <span class="acl-line-key-row is-profile"><i></i><b>profile overlap</b></span>
+      <span class="acl-line-key-row is-shared"><i></i><b>shared context</b></span>
+    </div>
+    <div class="acl-line-note">Circles are primary project groups. Lines are inferred from person profiles and should be treated as conversation leads.</div>`;
+  state.canvas.innerHTML = `
+    <div class="alch-constellation" data-constellation-view="map" data-constellation-scope="people">
+      <div class="alch-const-topbar">${constellationNav("map")}</div>
+      <div class="ac-map-control-stack is-people-scope">
+        ${constellationNetworkScopeRow("people", { projects: teams.length, people: people.length })}
+      </div>
+      <div class="alch-const-workbench">
+        <div class="alch-const-main">
+          <div class="alch-constellation-legend is-line-confidence">${legend}</div>
+          <div class="alch-constellation-stage ac-people-stage" data-view="people" data-lens="people" tabindex="0" aria-label="people connected to projects">
+            <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">
+              <g class="ac-person-wells">${groupMarkup}</g>
+              <g class="ac-person-links">${edgeMarkup}</g>
+              <g class="ac-people-nodes">${peopleMarkup}</g>
+            </svg>
+            <div class="ac-tip" hidden></div>
+          </div>
+        </div>
+        ${constellationInspectorShell(inspectorCtx)}
+      </div>
+    </div>`;
+  markConstellationSelection(state.constSelection);
+}
 
-  const W = 980, H = 540;
-  const layout = state.constellationLayout || "wells";
-  const model = constellationModel(teams, clusters);
-  const { wells, pos } = layout === "circle"
-    ? placeConstellationCircle(model, W, H)
-    : placeConstellation(model, W, H);
+function constellationModeNavHtml(active) {
+  return `
+    <nav class="alch-const-modes" role="tablist" aria-label="constellation view">
+      <button class="alch-const-mode-btn" data-const-mode="clusters" aria-selected="${active === "clusters"}" type="button">
+        <span class="acm-glyph" aria-hidden="true">◑</span><span class="acm-label">clusters</span>
+        <span class="acm-hint">shared cluster membership</span>
+      </button>
+      <button class="alch-const-mode-btn" data-const-mode="dependencies" aria-selected="${active === "dependencies"}" type="button">
+        <span class="acm-glyph" aria-hidden="true">↬</span><span class="acm-label">dependencies</span>
+        <span class="acm-hint">team-asserted edges</span>
+      </button>
+      <button class="alch-const-mode-btn" data-const-mode="journey" aria-selected="${active === "journey"}" type="button">
+        <span class="acm-glyph" aria-hidden="true">⌁</span><span class="acm-label">journey</span>
+        <span class="acm-hint">pmf maturity spectrum</span>
+      </button>
+      <button class="alch-const-mode-btn" data-const-mode="collab" aria-selected="${active === "collab"}" type="button">
+        <span class="acm-glyph" aria-hidden="true">⇄</span><span class="acm-label">collab board</span>
+        <span class="acm-hint">matrix · intros · convergence</span>
+      </button>
+    </nav>
+  `;
+}
 
-  // Cluster well backdrops (soft dashed ellipse + label) behind everything.
-  const wellMarkup = wells.map(w => `
-    <g class="ac-well" data-well="${escHtml(w.id)}">
-      <ellipse cx="${w.cx.toFixed(1)}" cy="${w.cy.toFixed(1)}" rx="${w.rx.toFixed(1)}" ry="${w.ry.toFixed(1)}"/>
-      <text class="ac-well-label" x="${w.cx.toFixed(1)}" y="${(w.cy - w.ry + 15).toFixed(1)}" text-anchor="middle">${escHtml(w.label)}</text>
-    </g>`).join("");
+function timelineSnapshotDate(snapshot) {
+  const iso = snapshot?.as_of || snapshot?.committed_at;
+  const d = iso ? new Date(iso) : null;
+  if (!d || !Number.isFinite(d.getTime())) return "date unknown";
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
 
-  // Edges:
-  // - "clusters":     undirected line between teams sharing a cluster.
-  // - "dependencies": directed arrow from a team to each team it depends on.
-  const edges = [];
-  if (mode === "clusters") {
-    for (const c of clusters) {
-      const present = (c.teams || []).filter(rid => pos.has(rid));
-      for (let i = 0; i < present.length; i++)
-        for (let j = i + 1; j < present.length; j++)
-          edges.push({ from: present[i], to: present[j], cluster: c, directed: false });
+function snapshotEventCount(snapshot) {
+  const id = snapshot?.id;
+  if (!id || !Array.isArray(state.cohortTimeline?.events)) return 0;
+  return state.cohortTimeline.events.filter((event) => event?.snapshot_id === id).length;
+}
+
+function timelineEventProvenance(event) {
+  const kind = String(event?.source_kind || event?.source_id || "").toLowerCase();
+  if (kind.includes("transcript")) return { className: "is-inferred", label: "inferred · transcript", source: "transcripts" };
+  if (kind.includes("router")) return { className: "is-inferred", label: "inferred · router", source: "router" };
+  if (!kind || kind.includes("git") || kind.includes("cohort")) return { className: "is-self", label: "self-declared", source: "cohort-data" };
+  return { className: "is-unclassified", label: "unclassified", source: kind };
+}
+
+function teamNameMap(surface) {
+  return new Map((surface?.teams || []).filter(t => t?.record_id).map(t => [t.record_id, t.name || t.record_id]));
+}
+
+function dependencyEdgeMap(surface) {
+  const names = teamNameMap(surface);
+  const out = new Map();
+  for (const team of (surface?.teams || [])) {
+    if (!team?.record_id) continue;
+    for (const dep of (Array.isArray(team.dependencies) ? team.dependencies : [])) {
+      if (!dep || dep === team.record_id || !names.has(dep)) continue;
+      const key = `${team.record_id}>${dep}`;
+      out.set(key, {
+        key,
+        kind: "dependency",
+        from: team.record_id,
+        to: dep,
+        fromName: names.get(team.record_id) || team.record_id,
+        toName: names.get(dep) || dep,
+        directed: true,
+        provenance: { className: "is-self", label: "self-declared", source: "cohort-data" },
+      });
     }
-  } else { // dependencies
-    const seen = new Set();
-    for (const t of teams) {
-      for (const dep of (Array.isArray(t.dependencies) ? t.dependencies : [])) {
-        if (!pos.has(dep) || dep === t.record_id) continue;
-        const k = t.record_id + ">" + dep;
-        if (seen.has(k)) continue;
-        seen.add(k);
-        edges.push({ from: t.record_id, to: dep, cluster: null, directed: true });
+  }
+  return out;
+}
+
+function clusterEdgeMap(surface) {
+  const names = teamNameMap(surface);
+  const out = new Map();
+  for (const cluster of (surface?.clusters || [])) {
+    const present = (Array.isArray(cluster?.teams) ? cluster.teams : []).filter(id => names.has(id));
+    for (let i = 0; i < present.length; i++) {
+      for (let j = i + 1; j < present.length; j++) {
+        const a = present[i], b = present[j];
+        const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+        if (out.has(key)) continue;
+        out.set(key, {
+          key,
+          kind: "cluster",
+          from: a,
+          to: b,
+          fromName: names.get(a) || a,
+          toName: names.get(b) || b,
+          cluster: cluster.record_id || cluster.name || "cluster",
+          clusterLabel: cluster.label || cluster.name || "cluster",
+          directed: false,
+          provenance: { className: "is-self", label: "self-declared cluster", source: "cohort-data" },
+        });
       }
     }
   }
+  return out;
+}
 
-  const edgeMarkup = edges.map(e => {
+function addedEdges(beforeMap, afterMap) {
+  return [...afterMap.entries()]
+    .filter(([key]) => !beforeMap.has(key))
+    .map(([, edge]) => edge);
+}
+
+function selectedTimelineEvents() {
+  const active = activeConstellationSnapshot();
+  const id = active?.id;
+  if (!id || !Array.isArray(state.cohortTimeline?.events)) return [];
+  return state.cohortTimeline.events.filter(event => event?.snapshot_id === id);
+}
+
+function inferredTimelineEvents(events) {
+  return (events || [])
+    .filter((event) => timelineEventProvenance(event).className === "is-inferred")
+    .slice(0, 24);
+}
+
+function constellationSnapshotDelta() {
+  const active = activeConstellationSnapshot();
+  const previous = previousConstellationSnapshot();
+  const currentSurface = active?.surface || state.cohort || {};
+  const previousSurface = previous?.surface || { teams: [], people: [], clusters: [] };
+  const dependencyAdded = addedEdges(dependencyEdgeMap(previousSurface), dependencyEdgeMap(currentSurface));
+  const clusterAdded = addedEdges(clusterEdgeMap(previousSurface), clusterEdgeMap(currentSurface));
+  const events = selectedTimelineEvents();
+  return {
+    active,
+    previous,
+    currentSurface,
+    dependencyAdded,
+    clusterAdded,
+    inferredEvents: inferredTimelineEvents(events),
+    events,
+  };
+}
+
+function constellationDeltaCount(delta = constellationSnapshotDelta()) {
+  return (delta.dependencyAdded?.length || 0) + (delta.clusterAdded?.length || 0) + (delta.inferredEvents?.length || 0);
+}
+
+function constellationEdgePath(edge, pos, extraClass = "") {
+  const a = pos.get(edge.from), b = pos.get(edge.to);
+  if (!a || !b) return "";
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const dist = Math.hypot(dx, dy) || 1;
+  const ux = dx / dist, uy = dy / dist;
+  const sx = a.x + ux * (a.r + 2), sy = a.y + uy * (a.r + 2);
+  const ex = b.x - ux * (b.r + (edge.directed ? 7 : 3)), ey = b.y - uy * (b.r + (edge.directed ? 7 : 3));
+  const bend = 12 + Math.min(48, dist * 0.12);
+  const qx = (sx + ex) / 2 - uy * bend, qy = (sy + ey) / 2 + ux * bend;
+  const cls = edge.directed
+    ? `ac-edge ac-edge-dependency ${extraClass}`.trim()
+    : `ac-edge ac-edge-${edge.cluster || "x"} ${extraClass}`.trim();
+  const marker = edge.directed ? ` marker-end="url(#ac-arrow)"` : "";
+  return `<path class="${cls}" data-a="${escHtml(edge.from)}" data-b="${escHtml(edge.to)}" d="M ${sx.toFixed(1)} ${sy.toFixed(1)} Q ${qx.toFixed(1)} ${qy.toFixed(1)} ${ex.toFixed(1)} ${ey.toFixed(1)}"${marker}/>`;
+}
+
+function renderConstellationTimelineControls({ compact = false, allowDelta = false } = {}) {
+  const snapshots = constellationSnapshots();
+  if (!snapshots.length) {
+    const status = state.cohortTimelineLoading
+      ? "timeline loading"
+      : state.cohortTimelineError
+        ? "timeline unavailable"
+        : "timeline pending";
+    const detail = state.cohortTimelineError || "using current cohort surface";
+    return `
+      <div class="ac-timeline ${compact ? "is-compact " : ""}is-disabled" data-ac-timeline>
+        <div class="ac-timeline-head">
+          <span class="ac-timeline-label">${escHtml(status)}</span>
+          <span class="ac-timeline-meta">${escHtml(detail)}</span>
+        </div>
+      </div>`;
+  }
+
+  const idx = ensureConstellationTimelineIdx();
+  const active = snapshots[idx] || snapshots[snapshots.length - 1];
+  const counts = active?.counts || {};
+  const changeCount = snapshotEventCount(active);
+  const label = active?.label || active?.id || "snapshot";
+  const date = timelineSnapshotDate(active);
+  const commit = active?.source_commit_short ? ` · ${active.source_commit_short}` : "";
+  const delta = allowDelta ? constellationSnapshotDelta() : null;
+  const deltaCount = delta ? constellationDeltaCount(delta) : 0;
+  const ticks = snapshots.map((snapshot, i) => {
+    const selected = i === idx;
+    const tickLabel = snapshot.label || snapshot.id;
+    return `
+      <button class="ac-timeline-tick${selected ? " is-active" : ""}" data-const-timeline-idx="${i}" type="button" aria-current="${selected ? "true" : "false"}" title="${escAttr(tickLabel)} · ${escAttr(timelineSnapshotDate(snapshot))}">
+        <span class="act-dot" aria-hidden="true"></span>
+        <span class="act-label">${escHtml(tickLabel)}</span>
+      </button>`;
+  }).join("");
+
+  return `
+    <div class="ac-timeline${compact ? " is-compact" : ""}" data-ac-timeline>
+      <div class="ac-timeline-head">
+        <span class="ac-timeline-label">${escHtml(label)}</span>
+        <span class="ac-timeline-meta">
+          ${escHtml(date + commit)} · ${Number(counts.teams) || 0} teams · ${Number(counts.people) || 0} people · ${changeCount} ${changeCount === 1 ? "change" : "changes"}
+        </span>
+      </div>
+      <input class="ac-timeline-range" data-const-timeline-range type="range" min="0" max="${Math.max(0, snapshots.length - 1)}" value="${idx}" step="1" aria-label="cohort timeline snapshot">
+      <div class="ac-timeline-ticks" style="--ac-timeline-count:${snapshots.length}">
+        ${ticks}
+      </div>
+      ${allowDelta ? `
+        <div class="ac-timeline-actions">
+          <button class="ac-timeline-delta-toggle" data-const-delta-toggle type="button" aria-pressed="${state.constellationShowDelta ? "true" : "false"}">
+            <span>show changes</span><strong>${deltaCount}</strong>
+          </button>
+          <span class="ac-timeline-boundary">off by default · self-declared unless marked inferred</span>
+        </div>` : ""}
+    </div>`;
+}
+
+function setConstellationTimelineIdx(rawIdx) {
+  const snapshots = constellationSnapshots();
+  if (!snapshots.length) return;
+  const next = Math.round(Number(rawIdx));
+  if (!Number.isFinite(next)) return;
+  const idx = Math.max(0, Math.min(snapshots.length - 1, next));
+  state.constellationTimelineIdx = idx;
+  try { localStorage.setItem(CONSTELLATION_TIMELINE_LS_KEY, String(idx)); } catch {}
+
+  if (state.detailRecordId && state.detailReturnMode === "constellation") {
+    render();
+    return;
+  }
+  if (state.mode === "constellation") {
+    renderConstellation();
+    wireConstellationHover();
+    if (state.constellationDrawerRecordId) openDrawer(state.constellationDrawerRecordId);
+  }
+}
+
+function wireConstellationTimelineControls(root = state.canvas) {
+  if (!root) return;
+  const range = root.querySelector("[data-const-timeline-range]");
+  if (range) {
+    range.addEventListener("input", () => {
+      const snapshots = constellationSnapshots();
+      if (!snapshots.length) return;
+      const next = Math.round(Number(range.value));
+      if (!Number.isFinite(next)) return;
+      const idx = Math.max(0, Math.min(snapshots.length - 1, next));
+      state.constellationTimelineIdx = idx;
+      try { localStorage.setItem(CONSTELLATION_TIMELINE_LS_KEY, String(idx)); } catch {}
+    });
+    range.addEventListener("change", () => setConstellationTimelineIdx(range.value));
+  }
+  for (const tick of root.querySelectorAll("[data-const-timeline-idx]")) {
+    tick.addEventListener("click", () => setConstellationTimelineIdx(tick.dataset.constTimelineIdx));
+  }
+  for (const btn of root.querySelectorAll("[data-const-delta-toggle]")) {
+    btn.addEventListener("click", () => {
+      state.constellationShowDelta = !state.constellationShowDelta;
+      render();
+    });
+  }
+}
+
+function renderConstellationDeltaLedger(delta) {
+  if (!state.constellationShowDelta || !delta) return "";
+  const currentLabel = delta.active?.label || delta.active?.id || "current snapshot";
+  const previousLabel = delta.previous?.label || delta.previous?.id || "empty baseline";
+  const edgeRow = (edge) => {
+    const arrow = edge.directed ? "->" : "<->";
+    const title = `${edge.fromName} ${arrow} ${edge.toName}`;
+    const kind = edge.directed ? "new dependency" : "new cluster connection";
+    const detail = edge.directed
+      ? `present in ${currentLabel}; absent from ${previousLabel}`
+      : `${edge.clusterLabel || "cluster"} membership creates this pair`;
+    return `
+      <article class="ac-delta-card ${edge.provenance?.className || "is-self"}">
+        <div class="ac-delta-card-head">
+          <span class="ac-delta-badge ${edge.provenance?.className || "is-self"}">${escHtml(edge.provenance?.label || "self-declared")}</span>
+          <span>${escHtml(kind)}</span>
+        </div>
+        <div class="ac-delta-card-title">${escHtml(title)}</div>
+        <div class="ac-delta-card-meta">${escHtml(detail)} · source: ${escHtml(edge.provenance?.source || "cohort-data")}</div>
+      </article>`;
+  };
+  const eventRow = (event) => {
+    const provenance = timelineEventProvenance(event);
+    const recordName = event?.record_name || event?.record_id || "record";
+    const summary = event?.summary || event?.subject || `${event?.action || "updated"} ${recordName}`;
+    return `
+      <article class="ac-delta-card ${provenance.className}">
+        <div class="ac-delta-card-head">
+          <span class="ac-delta-badge ${provenance.className}">${escHtml(provenance.label)}</span>
+          <span>${escHtml(event?.record_type || event?.collection || "context")}</span>
+        </div>
+        <div class="ac-delta-card-title">${escHtml(recordName)}</div>
+        <div class="ac-delta-card-meta">${escHtml(summary)} · source: ${escHtml(event?.source_id || provenance.source)}</div>
+      </article>`;
+  };
+  const rows = [
+    ...(delta.dependencyAdded || []).map(edgeRow),
+    ...(delta.clusterAdded || []).map(edgeRow),
+    ...(delta.inferredEvents || []).map(eventRow),
+  ];
+  const empty = rows.length ? "" : `
+    <div class="ac-delta-empty">
+      no new dependency, cluster, transcript, or router-derived evidence between ${escHtml(previousLabel)} and ${escHtml(currentLabel)}.
+    </div>`;
+  return `
+    <section class="ac-delta-ledger" aria-label="timeline connection changes">
+      <header class="ac-delta-head">
+        <h3>changes since previous snapshot</h3>
+        <span>${escHtml(previousLabel)} -> ${escHtml(currentLabel)}</span>
+      </header>
+      <div class="ac-delta-grid">
+        ${rows.join("")}
+        ${empty}
+      </div>
+    </section>`;
+}
+
+function renderConstellation() {
+  const teams = state.cohort.teams || [];
+  const people = state.cohort.people || [];
+  const clusters = state.cohort.clusters || [];
+  const mode = state.constellationMode === "wells" ? "map" : (state.constellationMode || "map");
+
+  // Journey sub-view renders a PMF scatterplot instead of the map.
+  // Collab Board is a peer Constellation sub-view (#216).
+  if (mode === "collab") { renderCollab(); return; }
+  if (mode === "journey") { renderJourney(); return; }
+  if (mode === "stack") { renderProductStack(); return; }
+
+  const lens = constNormalizeConstellationLens(state.constellationLens);
+  state.constellationLens = lens;
+  const viewMode = mode === "ring" ? "ring" : "map";
+  const networkScope = viewMode === "map" ? constNormalizeNetworkScope(state.constellationScope) : "projects";
+  const activeLens = viewMode === "ring" ? "all" : lens;
+  const W = 980, H = 540;
+  const model = constellationModel(teams, clusters, state.cohort?.dependencies || []);
+  const layout = viewMode === "ring" ? placeConstellationRing(model, W, H) : placeConstellation(model, W, H);
+  const { wells, ringSegments, pos, ringCenter } = layout;
+  const edges = model.edges.filter(e => pos.has(e.from) && pos.has(e.to));
+  if (networkScope === "people") {
+    renderConstellationPeople(teams, people, clusters, edges);
+    return;
+  }
+  const interestCtx = constInterestContext(teams, clusters, edges, state.constInterest);
+  const coverage = constConstellationCoverage(teams, edges);
+  const relationshipBreakdown = constRelationshipBreakdown(edges);
+  const inspectorCtx = { ...constellationInspectorContext(teams, edges, state.cohort?.people || []), clusters, distributionWells: model.wellsDef, lens: activeLens, mode: viewMode, scope: "projects", interest: interestCtx };
+  const bridgeRanks = viewMode === "ring"
+    ? new Map(constBridgeTeamRows(inspectorCtx, 5).map((row, idx) => [row.team.record_id, { row, rank: idx + 1 }]))
+    : new Map();
+  const accentSource = viewMode === "ring" ? ringSegments : wells;
+  const wellAccentById = new Map(accentSource.map((w, idx) => [w.id, constWellAccentTokens(w.id, idx)]));
+  const activeWellAccent = interestCtx.active ? wellAccentById.get(interestCtx.id) : null;
+
+  // Cluster well backdrops (soft dashed ellipse + label) behind everything.
+  // The WELL carries cluster identity (position + label). We do NOT recolor
+  // nodes by cluster: node color is
+  // always domain, so a team never changes color when you switch lenses.
+  // Long labels are truncated at rest with the full text in an SVG <title>.
+  const wellMarkup = wells.map((w, idx) => {
+    const isFocused = interestCtx.active && w.id === interestCtx.id;
+    const interestClass = interestCtx.active
+      ? (isFocused ? " is-interest-well" : (interestCtx.relatedClusterIds.has(w.id) ? " is-interest-related-well" : ""))
+      : "";
+    const densityClass = (w.members?.length || 0) > 3 ? " is-dense-well" : "";
+    const teamCount = w.members?.length || 0;
+    const aria = `${isFocused ? "Clear" : "Focus"} ${w.label || w.id} ecosystem, ${teamCount} team${teamCount === 1 ? "" : "s"}`;
+    const strokeWeight = (0.88 + Math.min(teamCount, 6) * 0.12).toFixed(2);
+    const accentStyle = `${constWellAccentStyle(wellAccentById.get(w.id) || constWellAccentTokens(w.id, idx))}; --well-stroke-width:${strokeWeight}`;
+    return `
+    <g class="ac-well${interestClass}${densityClass}" data-well="${escAttr(w.id)}" style="${escAttr(accentStyle)}" role="button" tabindex="0" aria-pressed="${isFocused ? "true" : "false"}" aria-label="${escAttr(aria)}">
+      <title>${escHtml(aria)}</title>
+      <circle class="ac-well-shape" cx="${w.cx.toFixed(1)}" cy="${w.cy.toFixed(1)}" r="${w.r.toFixed(1)}"/>
+      ${constWellLabelSvg(w, Math.max(18, w.cy - w.r - 18))}
+    </g>`;
+  }).join("");
+  const ringMarkup = (ringSegments || []).map((seg, idx) => {
+    const isFocused = interestCtx.active && seg.id === interestCtx.id;
+    const interestClass = interestCtx.active
+      ? (isFocused ? " is-interest-well" : (interestCtx.relatedClusterIds.has(seg.id) ? " is-interest-related-well" : ""))
+      : "";
+    const aria = `${isFocused ? "Clear" : "Focus"} ${seg.label || seg.id} ecosystem arc`;
+    const accentStyle = constWellAccentStyle(wellAccentById.get(seg.id) || constWellAccentTokens(seg.id, idx));
+    return `
+      <g class="ac-ring-world ac-well${interestClass}" data-well="${escAttr(seg.id)}" style="${escAttr(accentStyle)}" role="button" tabindex="0" aria-pressed="${isFocused ? "true" : "false"}" aria-label="${escAttr(aria)}">
+        <title>${escHtml(aria)}</title>
+        <path class="ac-ring-segment" d="${escAttr(seg.path)}"/>
+        ${constWellLabelSvg(seg, seg.cy, "ac-ring-label")}
+      </g>`;
+  }).join("");
+
+  // Edges are ONLY the self-asserted relationship arrows now — the single
+  // directed, actionable signal. (Cluster membership lives in the wells.)
+  // Nodes touching the active relationship question stay legible; unrelated
+  // nodes fade in relation-specific lenses.
+  const typedConnected = new Set();
+  const lensConnected = new Set();
+  const profileLinkConnected = new Set();
+  const profileLinkDegree = new Map();
+  const typedRecordDegree = new Map();
+  edges.forEach(e => {
+    if (constLensMatchesEdge(e, activeLens)) {
+      lensConnected.add(e.from);
+      lensConnected.add(e.to);
+    }
+    const targetSet = e.normalized ? typedConnected : profileLinkConnected;
+    targetSet.add(e.from);
+    targetSet.add(e.to);
+    if (e.normalized) {
+      typedRecordDegree.set(e.from, (typedRecordDegree.get(e.from) || 0) + 1);
+      typedRecordDegree.set(e.to, (typedRecordDegree.get(e.to) || 0) + 1);
+    } else {
+      profileLinkDegree.set(e.from, (profileLinkDegree.get(e.from) || 0) + 1);
+      profileLinkDegree.set(e.to, (profileLinkDegree.get(e.to) || 0) + 1);
+    }
+  });
+  const unclusteredIds = new Set(model.wellsDef.find(w => w.id === "_other")?.members || []);
+  const edgeDrawList = edges.slice().sort((a, b) =>
+    Number(Boolean(a.normalized)) - Number(Boolean(b.normalized))
+    || String(a.from || "").localeCompare(String(b.from || ""))
+    || String(a.to || "").localeCompare(String(b.to || "")));
+  const edgeMarkup = edgeDrawList.map(e => {
     const a = pos.get(e.from), b = pos.get(e.to);
     if (!a || !b) return "";
     const dx = b.x - a.x, dy = b.y - a.y;
     const dist = Math.hypot(dx, dy) || 1;
     const ux = dx / dist, uy = dy / dist;
     const sx = a.x + ux * (a.r + 2), sy = a.y + uy * (a.r + 2);
-    const ex = b.x - ux * (b.r + (e.directed ? 7 : 3)), ey = b.y - uy * (b.r + (e.directed ? 7 : 3));
+    const ex = b.x - ux * (b.r + 7), ey = b.y - uy * (b.r + 7);
     const bend = 12 + Math.min(48, dist * 0.12);
-    const qx = (sx + ex) / 2 - uy * bend, qy = (sy + ey) / 2 + ux * bend;
-    const cls = e.directed
-      ? "ac-edge ac-edge-dependency"
-      : `ac-edge ac-edge-${(e.cluster && (e.cluster.record_id || e.cluster.name)) || "x"}`;
-    const marker = e.directed ? ` marker-end="url(#ac-arrow)"` : "";
-    return `<path class="${cls}" data-a="${escHtml(e.from)}" data-b="${escHtml(e.to)}"`
-      + ` d="M ${sx.toFixed(1)} ${sy.toFixed(1)} Q ${qx.toFixed(1)} ${qy.toFixed(1)} ${ex.toFixed(1)} ${ey.toFixed(1)}"${marker}/>`;
+    let qx;
+    let qy;
+    if (ringCenter) {
+      const mx = (sx + ex) / 2;
+      const my = (sy + ey) / 2;
+      const seed = Math.abs(hashStr(`${e.from}:${e.to}:${e.id || e.relation || ""}`));
+      const spread = ((seed % 11) - 5) * 9;
+      qx = mx + (ringCenter.x - mx) * 0.10 - uy * spread;
+      qy = my + (ringCenter.y - my) * 0.10 + ux * spread;
+    } else {
+      qx = (sx + ex) / 2 - uy * bend;
+      qy = (sy + ey) / 2 + ux * bend;
+    }
+    const meaning = constRelationshipMeaning(e);
+    const lensMatchClass = constLensMatchesEdge(e, activeLens) ? " is-lens-match" : " is-lens-miss";
+    const interestClass = interestCtx.active
+      ? (constInterestOwnsEdge(e, interestCtx) ? " is-interest-edge" : (constInterestTouchesEdge(e, interestCtx) ? " is-interest-adjacent-edge" : " is-interest-outside"))
+      : "";
+    const cls = `ac-edge ac-edge-dependency ac-edge-meaning-${dependencySafeToken(meaning.key)} ac-edge-source-${e.normalized ? "record" : "legacy"} ac-edge-status-${dependencySafeToken(e.status)}${e.normalized ? " is-source-backed" : " is-profile-link"}${lensMatchClass}${interestClass}`;
+    const aria = `${model.byRecordId.get(e.from)?.name || e.from} ${meaning.label}: ${e.relation_label || "links to"} ${model.byRecordId.get(e.to)?.name || e.to}`;
+    const d = `M ${sx.toFixed(1)} ${sy.toFixed(1)} Q ${qx.toFixed(1)} ${qy.toFixed(1)} ${ex.toFixed(1)} ${ey.toFixed(1)}`;
+    return `<path class="${cls}" data-a="${escAttr(e.from)}" data-b="${escAttr(e.to)}" data-dep-id="${escAttr(e.id || "")}" aria-hidden="true" d="${escAttr(d)}" marker-end="url(#ac-arrow)"/>`
+      + `<path class="ac-edge-hit" data-a="${escAttr(e.from)}" data-b="${escAttr(e.to)}" data-dep-id="${escAttr(e.id || "")}" role="button" tabindex="0" aria-label="${escAttr(aria)}" d="${escAttr(d)}"/>`;
   }).join("");
 
-  // Draw small→large so keystones sit on top of the pile.
-  const nodeMarkup = [...pos.values()].sort((p, q) => p.r - q.r).map(({ team, x, y, r }) => `
-    <g class="ac-node-group ac-node-domain-${constDomainClass(team.domain)}" data-record-id="${escHtml(team.record_id)}" transform="translate(${x.toFixed(1)},${y.toFixed(1)})">
+  // Draw small→large so keystones sit on top of the pile. Node color is always
+  // domain (one coding across every lens). Under the relationships lens, nodes
+  // with no edge are flagged is-orphan (CSS fades them).
+  const nodeMarkup = [...pos.values()].sort((p, q) => p.r - q.r).map(({ team, x, y, r, angle, wellId, wellSize, rank }) => {
+    const orphan = (activeLens !== "all" && !lensConnected.has(team.record_id)) ? " is-orphan" : "";
+    const interestClass = interestCtx.active
+      ? (interestCtx.coreIds.has(team.record_id) ? " is-interest-core" : (interestCtx.neighborIds.has(team.record_id) ? " is-interest-neighbor" : " is-interest-outside"))
+      : "";
+    const densityClass = viewMode === "map" && wellSize > 1 ? " is-dense-well" : "";
+    const keystoneClass = viewMode === "map" && rank === 0 ? " is-keystone-label" : "";
+    const sourceClass = `${typedConnected.has(team.record_id) ? " is-source-backed" : ""}${profileLinkConnected.has(team.record_id) ? " is-profile-link" : ""}${unclusteredIds.has(team.record_id) ? " is-unclustered" : ""}${journeyAssessed(team) ? "" : " is-journey-missing"}`;
+    const gapCount = profileLinkDegree.get(team.record_id) || 0;
+    const typedCount = typedRecordDegree.get(team.record_id) || 0;
+    const typedRing = typedCount
+      ? `<circle class="ac-node-record-ring" r="${(r + 2.5 + Math.min(typedCount, 6) * 0.35).toFixed(1)}"><title>${escHtml(`${typedCount} relationship record${typedCount === 1 ? "" : "s"}`)}</title></circle>`
+      : "";
+    const bridgeRank = bridgeRanks.get(team.record_id);
+    const nodeAccentStyle = interestCtx.active && (interestCtx.coreIds.has(team.record_id) || interestCtx.neighborIds.has(team.record_id))
+      ? constWellAccentStyle(activeWellAccent)
+      : "";
+    const radialLabel = (viewMode === "ring" || (viewMode === "map" && wellSize > 2 && rank > 0)) && typeof angle === "number";
+    const labelAnchor = radialLabel
+      ? (Math.cos(angle) > 0.25 ? "start" : (Math.cos(angle) < -0.25 ? "end" : "middle"))
+      : "middle";
+    const labelGap = viewMode === "map" ? 17 : 13;
+    const labelX = radialLabel
+      ? (Math.cos(angle) > 0.25 ? r + 6 : (Math.cos(angle) < -0.25 ? -r - 6 : 0))
+      : 0;
+    const labelY = radialLabel
+      ? (viewMode === "map" ? (Math.abs(Math.sin(angle)) > 0.25 ? r + labelGap : 3) : (Math.sin(angle) < -0.25 ? -r - 8 : (Math.sin(angle) > 0.25 ? r + labelGap : 3)))
+      : r + labelGap;
+    const labelLines = constNodeLabelLines(team, viewMode);
+    const fullLabel = constText(team.name || team.record_id);
+    return `
+    <g class="ac-node-group ac-node-domain-${constDomainClass(team.domain)}${orphan}${sourceClass}${interestClass}${densityClass}${keystoneClass}${bridgeRank ? " is-bridge-ranked" : ""}" data-record-id="${escHtml(team.record_id)}" data-profile-link-count="${gapCount}" style="${escAttr(nodeAccentStyle)}" role="button" tabindex="0" aria-label="${escAttr(`inspect ${team.name || team.record_id}`)}" transform="translate(${x.toFixed(1)},${y.toFixed(1)})">
+      <circle class="ac-node-hit" r="${Math.max(18, r + 10).toFixed(1)}"/>
+      ${typedRing}
       <circle class="ac-node-shape ${team.is_mentor ? "ac-node-mentor" : ""}" r="${r.toFixed(1)}"/>
-      <text class="ac-node-label" y="${(r + 13).toFixed(1)}" text-anchor="middle">${escHtml(team.name)}</text>
-    </g>`).join("");
+      ${constNodeLabelSvg(labelLines, labelX, labelY, labelAnchor, fullLabel)}
+    </g>`;
+  }).join("");
 
-  const legend =
-    CONST_DOMAIN_KEYS.map(k => `<span class="acl-item"><span class="acl-dot acl-dot-${k}"></span>${escHtml(CONST_DOMAIN_LABEL[k])}</span>`).join("")
-    + `<span class="acl-item"><span class="acl-size"></span>larger = more teams depend on it</span>`
-    + (mode === "dependencies" ? `<span class="acl-item"><span class="acl-swatch acl-swatch-dependency"></span>declared dependency →</span>` : "");
-
-  const calloutBody = mode === "clusters"
-    ? `Teams grouped into their <strong>cohort cluster</strong> wells; lines join teams that share a cluster. Color = domain, size = how many teams declare a dependency on them. Hover a node for its frame; click to open the full card. Mentor teams render hollow.`
-    : `Arrows point from a team to the teams it <code>depends on</code> — self-asserted in the cohort surface. The biggest nodes are the cohort's keystones (most depended-upon). Hover for a frame; click for the card. See <button class="alch-link-btn" data-go="program" data-program-page="rules">program · rules</button> for why connections aren't inferred.`;
+  // Legend is the SAME in every lens — color = domain always. Cluster identity
+  // is read from the labeled wells, not the legend, so nothing swaps.
+  const legend = `
+    <div class="acl-line-key">
+      <strong>Line source</strong>
+      <span class="acl-line-key-row is-typed"><i></i><b>relationship record</b></span>
+      <span class="acl-line-key-row is-profile"><i></i><b>profile mention</b></span>
+    </div>
+    <div class="acl-line-note">Solid = a relationship record with type, status, evidence, or next action. Dotted = a project profile mention that needs confirmation.</div>`;
 
   state.canvas.innerHTML = `
-    <div class="alch-constellation">
-      <nav class="alch-const-modes" role="tablist" aria-label="constellation edge source">
-        <button class="alch-const-mode-btn" data-const-mode="clusters" aria-selected="${mode === "clusters"}" type="button">
-          <span class="acm-glyph" aria-hidden="true">◑</span><span class="acm-label">clusters</span>
-          <span class="acm-hint">shared cluster membership</span>
-        </button>
-        <button class="alch-const-mode-btn" data-const-mode="dependencies" aria-selected="${mode === "dependencies"}" type="button">
-          <span class="acm-glyph" aria-hidden="true">↬</span><span class="acm-label">dependencies</span>
-          <span class="acm-hint">team-asserted edges</span>
-        </button>
-        <button class="alch-const-mode-btn" data-const-mode="journey" aria-selected="${mode === "journey"}" type="button">
-          <span class="acm-glyph" aria-hidden="true">⌁</span><span class="acm-label">journey</span>
-          <span class="acm-hint">pmf maturity spectrum</span>
-        </button>
-      </nav>
-      <div class="ac-layout-toggle" role="group" aria-label="map layout">
-        <button class="ac-layout-btn" data-const-layout="wells" aria-selected="${layout === "wells"}" type="button">⬡ wells</button>
-        <button class="ac-layout-btn" data-const-layout="circle" aria-selected="${layout === "circle"}" type="button">◯ circle</button>
+    <div class="alch-constellation" data-constellation-view="${escAttr(viewMode)}">
+      <div class="alch-const-topbar">${constellationNav(viewMode)}</div>
+      ${viewMode === "map" || viewMode === "ring" ? `
+        <div class="ac-map-control-stack">
+          ${viewMode === "map" ? constellationNetworkScopeRow("projects", { projects: teams.length, people: people.length }) : ""}
+          ${constellationMapLayoutRow(viewMode)}
+          ${viewMode === "map" ? `
+            ${constellationLensRow(lens, { edges: coverage.edges, meaningMissing: coverage.meaningMissing, ...relationshipBreakdown })}
+          ` : ""}
+        </div>` : ""}
+      <div class="alch-const-workbench">
+        <div class="alch-const-main">
+          <div class="alch-constellation-legend">${legend}</div>
+          <div class="alch-constellation-stage" data-view="${escAttr(viewMode)}" data-lens="${activeLens}" data-interest="${escAttr(interestCtx.id)}" data-interest-active="${interestCtx.active ? "true" : "false"}" tabindex="0" aria-label="${escAttr(viewMode === "ring" ? "constellation bridge ring graph" : "constellation relationship graph")}">
+            <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">
+              <defs>
+                <marker id="ac-arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                  <path d="M0,0 L10,5 L0,10 z"/>
+                </marker>
+              </defs>
+              <g class="ac-wells">${viewMode === "ring" ? ringMarkup : wellMarkup}</g>
+              <g class="ac-edges">${edgeMarkup}</g>
+              <g class="ac-nodes">${nodeMarkup}</g>
+            </svg>
+            <div class="ac-tip" hidden></div>
+          </div>
+        </div>
+        ${constellationInspectorShell(inspectorCtx)}
       </div>
-      <div class="alch-constellation-stage">
-        <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">
-          <defs>
-            <marker id="ac-arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-              <path d="M0,0 L10,5 L0,10 z"/>
-            </marker>
-          </defs>
-          <g class="ac-wells">${wellMarkup}</g>
-          <g class="ac-edges">${edgeMarkup}</g>
-          <g class="ac-nodes">${nodeMarkup}</g>
-        </svg>
-      </div>
-      <div class="alch-constellation-legend">${legend}</div>
-      <div class="ac-hoverline" data-ac-hoverline aria-live="polite"></div>
-      <p class="alch-callout"><strong>cohort map · v0.4</strong><br/>${calloutBody}</p>
     </div>
   `;
 }
@@ -1831,57 +5552,383 @@ function closeDetail() {
 
 // ─── constellation hover ─────────────────────────────────────────────
 function wireConstellationHover() {
+  wireConstellationModeNav();
   const stage = state.canvas.querySelector(".alch-constellation-stage");
+  if (!state.constellationEscapeBound) {
+    state.constellationEscapeBound = true;
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || !state.constSelection || state.mode !== "constellation") return;
+      const editing = e.target?.closest?.("input, textarea, select, [contenteditable='true']");
+      if (editing) return;
+      if (!state.canvas?.querySelector(".alch-constellation")) return;
+      e.preventDefault();
+      setConstellationInspector(null, constellationCurrentInspectorContext());
+    });
+  }
   if (stage) {
-    const groups = stage.querySelectorAll(".ac-node-group");
-    // Hovering a node shows its watered-down frame (public fields only) in a
-    // FIXED-HEIGHT line — never the callout, whose reflow used to shrink the
-    // flex stage, move the node out from under the cursor, and flicker.
-    const hoverEl = state.canvas.querySelector("[data-ac-hoverline]");
-    const cohortIndex = buildCohortIndex(state.cohort);
-    const teamById = cohortIndex.teamById;
-    const indeg = constellationIndegree(cohortIndex.teams);
-    for (const g of groups) {
+    // ONE styled floating tooltip serves both the map and the journey scatter
+    // (was a fixed hover-line on the map + a separate floating tip on journey).
+    const tip = stage.querySelector(".ac-tip");
+    const teams = state.cohort?.teams || [];
+    const clusters = state.cohort?.clusters || [];
+    const teamById = new Map(teams.map(t => [t.record_id, t]));
+    const edges = constellationDependencyEdges(teams, undefined, state.cohort?.dependencies || []).filter(e => teamById.has(e.from) && teamById.has(e.to));
+    const model = constellationModel(teams, clusters, state.cohort?.dependencies || []);
+    const rawMode = state.constellationMode === "wells" ? "map" : state.constellationMode;
+    const viewMode = rawMode === "ring" || rawMode === "journey" || rawMode === "stack" ? rawMode : "map";
+    const activeLens = viewMode === "ring" || viewMode === "stack" ? "all" : constNormalizeConstellationLens(state.constellationLens);
+    const scope = viewMode === "map" ? constNormalizeNetworkScope(state.constellationScope) : "projects";
+    const baseInspectorCtx = { ...constellationInspectorContext(teams, edges, state.cohort?.people || []), clusters, distributionWells: model.wellsDef, lens: activeLens, mode: viewMode, scope, interest: constInterestContext(teams, clusters, edges, state.constInterest) };
+    const peopleModel = scope === "people" ? constPeopleNetworkModel(state.cohort?.people || [], teams, 1120, 620) : null;
+    const inspectorCtx = viewMode === "stack"
+      ? { ...baseInspectorCtx, stackModel: constProductStackModel(teams, baseInspectorCtx) }
+      : (peopleModel ? { ...baseInspectorCtx, peopleModel } : baseInspectorCtx);
+    const indeg = constellationIndegree(teams, state.cohort?.dependencies || []);
+    const sourceStatsByRid = new Map();
+    for (const edge of edges) {
+      for (const rid of [edge.from, edge.to]) {
+        if (!teamById.has(rid)) continue;
+        const cur = sourceStatsByRid.get(rid) || { typed: 0, profile: 0 };
+        if (edge.normalized) cur.typed++;
+        else cur.profile++;
+        sourceStatsByRid.set(rid, cur);
+      }
+    }
+    // rid → all cluster labels it belongs to (not just the primary well).
+    const clusterLabelsByRid = new Map();
+    for (const cl of clusters) {
+      const label = cl.label || cl.name || "cluster";
+      for (const rid of (cl.teams || [])) {
+        if (!teamById.has(rid)) continue;
+        if (!clusterLabelsByRid.has(rid)) clusterLabelsByRid.set(rid, []);
+        clusterLabelsByRid.get(rid).push(label);
+      }
+    }
+    markConstellationSelection(state.constSelection);
+    const setInterestFocus = (targetId) => {
+      const next = targetId && targetId === state.constInterest ? "all" : (targetId || "all");
+      state.constInterest = next;
+      state.constSelection = null;
+      try { localStorage.setItem(CONST_INTEREST_LS_KEY, next); } catch {}
+      render();
+    };
+    // Cluster wells are the ecosystem control. Clicking the visual circle now
+    // changes the graph read; the old text-chip row was redundant.
+    for (const well of stage.querySelectorAll(".ac-well[data-well]")) {
+      const wellId = well.getAttribute("data-well") || "all";
+      const showWellTip = (e) => {
+        const focus = constInterestContext(teams, clusters, edges, wellId);
+        if (!tip || !focus.active) return;
+        const directEdges = edges.filter(edge => constInterestOwnsEdge(edge, focus));
+        tip.innerHTML = `
+          <div class="ajt-name">${escHtml(constClusterLabel(focus.cluster))}</div>
+          <div class="ajt-row"><span class="ajt-k">teams</span><span class="ajt-v">${escHtml(String(focus.coreTeams.length))} core · ${escHtml(String(focus.neighborTeams.length))} adjacent</span></div>
+          <div class="ajt-row"><span class="ajt-k">lines</span><span class="ajt-v">${escHtml(String(directEdges.length))} direct relationship line${directEdges.length === 1 ? "" : "s"}</span></div>
+          <div class="ajt-row"><span class="ajt-k">action</span><span class="ajt-v">${wellId === state.constInterest ? "click to show whole map" : "click to focus this ecosystem"}</span></div>`;
+        tip.hidden = false;
+        if (e && typeof e.clientX === "number") positionConstTip(stage, tip, e);
+      };
+      well.addEventListener("mouseenter", showWellTip);
+      well.addEventListener("mousemove", (e) => positionConstTip(stage, tip, e));
+      well.addEventListener("mouseleave", () => { if (tip) tip.hidden = true; });
+      well.addEventListener("click", (e) => {
+        e.preventDefault();
+        setInterestFocus(wellId);
+      });
+      well.addEventListener("focus", () => showWellTip(null));
+      well.addEventListener("blur", () => { if (tip) tip.hidden = true; });
+      well.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        setInterestFocus(wellId);
+      });
+    }
+    // Map nodes: hover lights the touching edges + shows the provenance tip.
+    for (const g of stage.querySelectorAll(".ac-node-group")) {
       const rid = g.dataset.recordId;
-      g.addEventListener("mouseenter", () => {
+      g.addEventListener("mouseenter", (e) => {
         setConstellationHover(stage, rid, true);
         const t = teamById.get(rid);
-        if (hoverEl && t) hoverEl.innerHTML = constFrameLine(t, indeg.get(rid) || 0);
+        if (tip && t) {
+          tip.innerHTML = constNodeTipHTML(t, indeg.get(rid) || 0, inspectorCtx.outBy, inspectorCtx.inBy, clusterLabelsByRid.get(rid), sourceStatsByRid.get(rid));
+          tip.hidden = false;
+          positionConstTip(stage, tip, e);
+        }
       });
+      g.addEventListener("mousemove", (e) => positionConstTip(stage, tip, e));
       g.addEventListener("mouseleave", () => {
         setConstellationHover(stage, rid, false);
-        if (hoverEl) hoverEl.innerHTML = "";
+        if (tip) tip.hidden = true;
       });
-      g.addEventListener("click", () => openDrawer(rid));
+      g.addEventListener("click", (e) => {
+        e.preventDefault();
+        setConstellationInspector({ type: "team", rid }, inspectorCtx);
+      });
+      g.addEventListener("focus", () => {
+        setConstellationHover(stage, rid, true);
+      });
+      g.addEventListener("blur", () => setConstellationHover(stage, rid, false));
+      g.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        setConstellationInspector({ type: "team", rid }, inspectorCtx);
+      });
     }
-    // Journey scatterplot nodes: hover → tooltip, click → drawer.
-    const tip = stage.querySelector(".alch-journey-tip");
-    const byId = cohortIndex.teamById;
+    for (const item of stage.querySelectorAll(".ac-stack-team[data-const-team]")) {
+      const rid = item.getAttribute("data-const-team");
+      item.addEventListener("mouseenter", (e) => {
+        const t = teamById.get(rid);
+        if (tip && t) {
+          const item = constStackItemForTeam(inspectorCtx, rid);
+          const role = item?.role || constMarketRoleForTeam(t);
+          const evidence = item?.evidence || constEvidenceModeForTeam(t, inspectorCtx);
+          const evidenceRead = evidence.key === "profile"
+            ? evidence.label
+            : `${evidence.label} · ${String(evidence.value)}/5`;
+          const secondary = role.secondary;
+          tip.innerHTML = `
+            <div class="ajt-name">${escHtml(t.name || t.record_id)}</div>
+            <div class="ajt-row"><span class="ajt-k">role</span><span class="ajt-v">${escHtml(role.label)}</span></div>
+            ${secondary ? `<div class="ajt-row"><span class="ajt-k">also</span><span class="ajt-v">${escHtml(secondary.label)}</span></div>` : ""}
+            <div class="ajt-row"><span class="ajt-k">proof</span><span class="ajt-v">${escHtml(evidenceRead)}</span></div>
+            <div class="ajt-row"><span class="ajt-k">source</span><span class="ajt-v">${escHtml(role.reason)}</span></div>`;
+          tip.hidden = false;
+          positionConstTip(stage, tip, e);
+        }
+      });
+      item.addEventListener("mousemove", (e) => positionConstTip(stage, tip, e));
+      item.addEventListener("mouseleave", () => { if (tip) tip.hidden = true; });
+      item.addEventListener("click", (e) => {
+        e.preventDefault();
+        if (rid) openDrawer(rid);
+      });
+      item.addEventListener("focus", () => {
+        const t = teamById.get(rid);
+        if (tip && t) {
+          const item = constStackItemForTeam(inspectorCtx, rid);
+          const role = item?.role || constMarketRoleForTeam(t);
+          const evidence = item?.evidence || constEvidenceModeForTeam(t, inspectorCtx);
+          const evidenceRead = evidence.key === "profile"
+            ? evidence.label
+            : `${evidence.label} · ${String(evidence.value)}/5`;
+          tip.innerHTML = `<div class="ajt-name">${escHtml(t.name || t.record_id)}</div><div class="ajt-row"><span class="ajt-k">role</span><span class="ajt-v">${escHtml(role.label)}</span></div>${role.secondary ? `<div class="ajt-row"><span class="ajt-k">also</span><span class="ajt-v">${escHtml(role.secondary.label)}</span></div>` : ""}<div class="ajt-row"><span class="ajt-k">proof</span><span class="ajt-v">${escHtml(evidenceRead)}</span></div>`;
+          tip.hidden = false;
+        }
+      });
+      item.addEventListener("blur", () => { if (tip) tip.hidden = true; });
+      item.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        if (rid) openDrawer(rid);
+      });
+    }
+    // Dependency paths: hover identifies the line; click pins the full evidence
+    // in the fixed inspector.
+    for (const edgeEl of stage.querySelectorAll(".ac-edge[data-a][data-b], .ac-edge-hit[data-a][data-b]")) {
+      const from = edgeEl.dataset.a;
+      const to = edgeEl.dataset.b;
+      const edge = inspectorCtx.edgeByPair.get(dependencyPairKey(from, to)) || { from, to };
+      const selectEdge = (e) => {
+        const meaning = constRelationshipMeaning(edge);
+        setConstellationEdgeHover(stage, from, to, true);
+        if (tip && teamById.has(from) && teamById.has(to)) {
+          const status = constRelationshipStatus(edge);
+          const source = constRelationshipSource(edge);
+          const confidence = edge.normalized ? "relationship record" : "profile mention";
+          tip.innerHTML = `<div class="ajt-name">${escHtml(teamById.get(from).name || from)} → ${escHtml(teamById.get(to).name || to)}</div><div class="ajt-row"><span class="ajt-k">line source</span><span class="ajt-v">${escHtml(confidence)}</span></div><div class="ajt-row"><span class="ajt-k">line</span><span class="ajt-v">${escHtml(meaning.label)} · ${escHtml(status.label)}</span></div><div class="ajt-row"><span class="ajt-k">source</span><span class="ajt-v">${escHtml(source.label)}</span></div><div class="ajt-row"><span class="ajt-k">action</span><span class="ajt-v">click for evidence and next action</span></div>`;
+          if (typeof e.clientX === "number") {
+            tip.hidden = false;
+            positionConstTip(stage, tip, e);
+          }
+        }
+      };
+      edgeEl.addEventListener("mouseenter", selectEdge);
+      edgeEl.addEventListener("mousemove", (e) => positionConstTip(stage, tip, e));
+      edgeEl.addEventListener("mouseleave", () => {
+        setConstellationEdgeHover(stage, from, to, false);
+        if (tip) tip.hidden = true;
+      });
+      edgeEl.addEventListener("focus", selectEdge);
+      edgeEl.addEventListener("blur", () => setConstellationEdgeHover(stage, from, to, false));
+      edgeEl.addEventListener("click", (e) => {
+        e.preventDefault();
+        setConstellationInspector({ type: "edge", from, to }, inspectorCtx);
+      });
+      edgeEl.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        setConstellationInspector({ type: "edge", from, to }, inspectorCtx);
+      });
+    }
+    // Journey scatterplot nodes: same tip element, journey content.
     for (const node of stage.querySelectorAll(".ac-jnode")) {
       const rid = node.dataset.recordId;
-      node.addEventListener("mouseenter", () => showJourneyTip(stage, tip, byId.get(rid)));
-      node.addEventListener("mousemove", (e) => positionJourneyTip(stage, tip, e));
+      node.addEventListener("mouseenter", (e) => {
+        showJourneyTip(stage, tip, teamById.get(rid));
+        positionConstTip(stage, tip, e);
+      });
+      node.addEventListener("mousemove", (e) => positionConstTip(stage, tip, e));
       node.addEventListener("mouseleave", () => { if (tip) tip.hidden = true; });
-      node.addEventListener("click", () => openDrawer(rid));
+      node.addEventListener("click", (e) => {
+        e.preventDefault();
+        if (rid) openDrawer(rid);
+      });
+      node.addEventListener("focus", () => {
+        showJourneyTip(stage, tip, teamById.get(rid));
+      });
+      node.addEventListener("blur", () => { if (tip) tip.hidden = true; });
+      node.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        if (rid) openDrawer(rid);
+      });
     }
-  }
-  // Mode-toggle nav: switches the edge source between cluster-membership
-  // and team-asserted dependencies. State persists for the session.
-  for (const btn of state.canvas.querySelectorAll(".alch-const-mode-btn[data-const-mode]")) {
-    btn.addEventListener("click", () => {
-      const next = btn.dataset.constMode;
-      if (next === state.constellationMode) return;
-      state.constellationMode = next;
-      render();
-    });
+    for (const node of stage.querySelectorAll(".ac-person-node[data-person-id]")) {
+      const rid = node.getAttribute("data-person-id");
+      const person = inspectorCtx.personById?.get(rid);
+      node.addEventListener("mouseenter", (e) => {
+        setConstellationPersonHover(stage, rid, true);
+        if (tip && person) {
+          tip.innerHTML = constPersonTipHTML(person, inspectorCtx.peopleModel, inspectorCtx);
+          tip.hidden = false;
+          positionConstTip(stage, tip, e);
+        }
+      });
+      node.addEventListener("mousemove", (e) => positionConstTip(stage, tip, e));
+      node.addEventListener("mouseleave", () => {
+        setConstellationPersonHover(stage, rid, false);
+        if (tip) tip.hidden = true;
+      });
+      node.addEventListener("click", (e) => {
+        e.preventDefault();
+        if (rid) setConstellationInspector({ type: "person", rid }, inspectorCtx);
+      });
+      node.addEventListener("focus", () => {
+        setConstellationPersonHover(stage, rid, true);
+        if (tip && person) {
+          tip.innerHTML = constPersonTipHTML(person, inspectorCtx.peopleModel, inspectorCtx);
+          tip.hidden = false;
+        }
+      });
+      node.addEventListener("blur", () => {
+        setConstellationPersonHover(stage, rid, false);
+        if (tip) tip.hidden = true;
+      });
+      node.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        if (rid) setConstellationInspector({ type: "person", rid }, inspectorCtx);
+      });
+    }
+    for (const anchor of stage.querySelectorAll(".ac-project-anchor[data-const-team]")) {
+      const rid = anchor.getAttribute("data-const-team");
+      anchor.addEventListener("mouseenter", (e) => {
+        setConstellationPersonProjectHover(stage, rid, true);
+        const t = teamById.get(rid);
+        if (tip && t) {
+          const linked = inspectorCtx.peopleModel?.edges?.filter(edge => edge.team === rid && edge.kind === "primary").length || 0;
+          tip.innerHTML = `<div class="ajt-name">${escHtml(t.name || t.record_id)}</div><div class="ajt-row"><span class="ajt-k">people</span><span class="ajt-v">${escHtml(String(linked))} primary project member${linked === 1 ? "" : "s"}</span></div><div class="ajt-row"><span class="ajt-k">source</span><span class="ajt-v">person.team fields</span></div><div class="ajt-row"><span class="ajt-k">action</span><span class="ajt-v">click to inspect project</span></div>`;
+          tip.hidden = false;
+          positionConstTip(stage, tip, e);
+        }
+      });
+      anchor.addEventListener("mousemove", (e) => positionConstTip(stage, tip, e));
+      anchor.addEventListener("mouseleave", () => {
+        setConstellationPersonProjectHover(stage, rid, false);
+        if (tip) tip.hidden = true;
+      });
+      anchor.addEventListener("click", (e) => {
+        e.preventDefault();
+        if (rid) setConstellationInspector({ type: "team", rid }, inspectorCtx);
+      });
+      anchor.addEventListener("focus", () => setConstellationPersonProjectHover(stage, rid, true));
+      anchor.addEventListener("blur", () => setConstellationPersonProjectHover(stage, rid, false));
+      anchor.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        if (rid) setConstellationInspector({ type: "team", rid }, inspectorCtx);
+      });
+    }
+    for (const group of stage.querySelectorAll(".ac-person-well[data-const-team]")) {
+      const rid = group.getAttribute("data-const-team");
+      const t = teamById.get(rid);
+      group.addEventListener("mouseenter", (e) => {
+        setConstellationPersonProjectHover(stage, rid, true);
+        if (tip && t) {
+          const linked = stage.querySelectorAll(`.ac-person-node[data-person-team="${CSS.escape(rid)}"]`).length;
+          tip.innerHTML = `<div class="ajt-name">${escHtml(t.name || t.record_id)}</div><div class="ajt-row"><span class="ajt-k">people</span><span class="ajt-v">${escHtml(String(linked))} primary member${linked === 1 ? "" : "s"}</span></div><div class="ajt-row"><span class="ajt-k">action</span><span class="ajt-v">click to inspect project</span></div>`;
+          tip.hidden = false;
+          positionConstTip(stage, tip, e);
+        }
+      });
+      group.addEventListener("mousemove", (e) => positionConstTip(stage, tip, e));
+      group.addEventListener("mouseleave", () => {
+        setConstellationPersonProjectHover(stage, rid, false);
+        if (tip) tip.hidden = true;
+      });
+      group.addEventListener("click", (e) => {
+        e.preventDefault();
+        if (rid) setConstellationInspector({ type: "team", rid }, inspectorCtx);
+      });
+      group.addEventListener("focus", () => setConstellationPersonProjectHover(stage, rid, true));
+      group.addEventListener("blur", () => setConstellationPersonProjectHover(stage, rid, false));
+      group.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        if (rid) setConstellationInspector({ type: "team", rid }, inspectorCtx);
+      });
+    }
   }
   // Layout toggle: cluster-grouped wells ↔ single ring (the original view).
   for (const btn of state.canvas.querySelectorAll(".ac-layout-btn[data-const-layout]")) {
     btn.addEventListener("click", () => {
-      const next = btn.dataset.constLayout;
-      if (next === state.constellationLayout) return;
-      state.constellationLayout = next;
+      const next = constNormalizeNetworkScope(btn.dataset.constNetworkScope);
+      if (next === state.constellationScope) return;
+      state.constellationScope = next;
+      state.constSelection = null;
+      if (state.constellationMode === "ring" && next === "people") state.constellationMode = "map";
+      try {
+        localStorage.setItem(CONST_SCOPE_LS_KEY, next);
+        localStorage.setItem(CONST_MODE_LS_KEY, state.constellationMode);
+      } catch {}
       render();
+    });
+  }
+  // Map layout: same question, alternate geometry. Persisted with view mode.
+  for (const btn of state.canvas.querySelectorAll(".ac-map-layout-btn[data-const-map-layout]")) {
+    btn.addEventListener("click", () => {
+      const next = btn.dataset.constMapLayout === "ring" ? "ring" : "map";
+      if (next === state.constellationMode) return;
+      state.constellationMode = next;
+      state.constSelection = null;
+      try { localStorage.setItem(CONST_MODE_LS_KEY, next); } catch {}
+      render();
+    });
+  }
+  // Map lens: re-weights the same map by line type. Persisted.
+  for (const btn of state.canvas.querySelectorAll(".ac-lens-btn[data-const-lens]")) {
+    btn.addEventListener("click", () => {
+      const next = constNormalizeConstellationLens(btn.dataset.constLens);
+      if (next === state.constellationLens) return;
+      state.constellationLens = next;
+      try { localStorage.setItem(CONST_LENS_LS_KEY, next); } catch {}
+      render();
+    });
+  }
+  for (const target of state.canvas.querySelectorAll(".ac-distribution-card [data-const-interest]")) {
+    const selectDistributionInterest = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const next = target.getAttribute("data-const-interest") || "all";
+      state.constInterest = next;
+      state.constSelection = null;
+      try { localStorage.setItem(CONST_INTEREST_LS_KEY, next); } catch {}
+      render();
+    };
+    target.addEventListener("click", selectDistributionInterest);
+    target.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      selectDistributionInterest(e);
     });
   }
   // Inline jump to program → rules from the callout (dependencies mode).
@@ -1911,30 +5958,327 @@ function wireConstellationHover() {
       render();
     });
   }
+  const inspector = state.canvas.querySelector(".ac-inspector");
+  if (inspector) {
+    wireExternalLinks(inspector);
+    inspector.addEventListener("click", (e) => {
+      const clearTarget = e.target.closest("[data-const-clear-selection]");
+      if (clearTarget) {
+        setConstellationInspector(null, constellationCurrentInspectorContext());
+        return;
+      }
+      const openTarget = e.target.closest("[data-const-open-record]");
+      if (openTarget) {
+        const rid = openTarget.getAttribute("data-const-open-record");
+        if (rid && constellationCurrentInspectorContext().personById?.has(rid)) openDetail(rid);
+        else if (rid) openDrawer(rid);
+        return;
+      }
+      const personTarget = e.target.closest("[data-const-person]");
+      if (personTarget) {
+        const rid = personTarget.getAttribute("data-const-person");
+        if (rid) openDetail(rid);
+        return;
+      }
+      const interestTarget = e.target.closest("[data-const-interest]");
+      if (interestTarget) {
+        const next = interestTarget.getAttribute("data-const-interest") || "all";
+        state.constInterest = next;
+        state.constSelection = null;
+        try { localStorage.setItem(CONST_INTEREST_LS_KEY, next); } catch {}
+        render();
+        return;
+      }
+      const edgeTarget = e.target.closest("[data-const-edge-from][data-const-edge-to]");
+      if (edgeTarget) {
+        const from = edgeTarget.getAttribute("data-const-edge-from");
+        const to = edgeTarget.getAttribute("data-const-edge-to");
+        if (from && to) {
+          setConstellationInspector({ type: "edge", from, to }, constellationCurrentInspectorContext());
+        }
+        return;
+      }
+      const target = e.target.closest("[data-const-team]");
+      if (!target) return;
+      const rid = target.getAttribute("data-const-team");
+      if (rid) {
+        setConstellationInspector({ type: "team", rid }, constellationCurrentInspectorContext());
+      }
+    });
+  }
+}
+
+function setConstellationInspector(selection, ctx) {
+  state.constSelection = selection || null;
+  const head = state.canvas?.querySelector(".ac-inspector-head");
+  if (head) head.innerHTML = constellationInspectorHeaderHtml(state.constSelection, ctx);
+  const body = state.canvas?.querySelector(".ac-inspector-body");
+  if (body) body.innerHTML = constellationInspectorLeadHtml(ctx, state.constSelection) + constellationInspectorHtml(state.constSelection, ctx);
+  if (head) wireExternalLinks(head);
+  if (body) wireExternalLinks(body);
+  markConstellationSelection(state.constSelection);
+}
+
+function stepConstellationTeamSelection(delta, fromTarget) {
+  const ctx = constellationCurrentInspectorContext();
+  const order = constellationTeamNavOrder(ctx);
+  if (!order.length) return;
+  const targetRid = fromTarget?.closest?.("[data-const-team], [data-record-id]")?.getAttribute?.("data-const-team")
+    || fromTarget?.closest?.("[data-const-team], [data-record-id]")?.getAttribute?.("data-record-id")
+    || "";
+  const currentRid = state.constSelection?.type === "team"
+    ? state.constSelection.rid
+    : (state.constSelection?.type === "edge" ? state.constSelection.to : targetRid);
+  const foundIdx = order.findIndex(team => team.record_id === currentRid);
+  const currentIdx = foundIdx >= 0 ? foundIdx : (delta > 0 ? -1 : 0);
+  const nextIdx = (currentIdx + delta + order.length) % order.length;
+  const next = order[nextIdx];
+  if (!next?.record_id) return;
+  setConstellationInspector({ type: "team", rid: next.record_id }, ctx);
+  const node = state.canvas?.querySelector(`.ac-node-group[data-record-id="${CSS.escape(next.record_id)}"], .ac-jnode[data-record-id="${CSS.escape(next.record_id)}"], .ac-stack-team[data-const-team="${CSS.escape(next.record_id)}"]`);
+  try { node?.focus?.({ preventScroll: true }); } catch { node?.focus?.(); }
+}
+
+function markConstellationSelection(selection) {
+  const root = state.canvas?.querySelector(".alch-constellation");
+  if (!root) return;
+  const stage = root.querySelector(".alch-constellation-stage");
+  if (stage) stage.removeAttribute("data-selection-active");
+  root.querySelectorAll(
+    ".is-selected, .is-selected-team-row, .is-selection-core, .is-selection-neighbor, .is-selection-outside, .is-selection-edge, .is-selection-adjacent-edge"
+  ).forEach(el => el.classList.remove(
+    "is-selected",
+    "is-selected-team-row",
+    "is-selection-core",
+    "is-selection-neighbor",
+    "is-selection-outside",
+    "is-selection-edge",
+    "is-selection-adjacent-edge"
+  ));
+  if (!selection) return;
+  if (stage) stage.setAttribute("data-selection-active", "true");
+  const nodeEls = [...root.querySelectorAll(".ac-node-group[data-record-id], .ac-person-node[data-person-id], .ac-project-anchor[data-const-team], .ac-person-well[data-const-team], .ac-jnode[data-record-id], .ac-stack-team[data-const-team]")];
+  const edgeEls = [...root.querySelectorAll(".ac-edge[data-a][data-b], .ac-person-link[data-person][data-team]")];
+  const classifyNode = (recordId, coreIds, neighborIds) => {
+    const id = String(recordId || "");
+    if (coreIds.has(id)) return "is-selection-core";
+    if (neighborIds.has(id)) return "is-selection-neighbor";
+    return "is-selection-outside";
+  };
+  if (selection?.type === "team") {
+    const coreIds = new Set([selection.rid]);
+    const neighborIds = new Set();
+    edgeEls.forEach(edge => {
+      if (edge.classList.contains("ac-person-link")) {
+        const personId = edge.getAttribute("data-person");
+        const teamId = edge.getAttribute("data-team");
+        const personA = edge.getAttribute("data-person-a");
+        const personB = edge.getAttribute("data-person-b");
+        const aTeam = personA ? root.querySelector(`.ac-person-node[data-person-id="${CSS.escape(personA)}"]`)?.getAttribute("data-person-team") : "";
+        const bTeam = personB ? root.querySelector(`.ac-person-node[data-person-id="${CSS.escape(personB)}"]`)?.getAttribute("data-person-team") : "";
+        if (teamId === selection.rid || aTeam === selection.rid || bTeam === selection.rid) {
+          edge.classList.add("is-selection-edge");
+          if (personId) neighborIds.add(personId);
+          if (personA) neighborIds.add(personA);
+          if (personB) neighborIds.add(personB);
+        } else {
+          edge.classList.add("is-selection-outside");
+        }
+        return;
+      }
+      const a = edge.dataset.a;
+      const b = edge.dataset.b;
+      if (a === selection.rid || b === selection.rid) {
+        edge.classList.add("is-selection-edge");
+        neighborIds.add(a === selection.rid ? b : a);
+      } else {
+        edge.classList.add("is-selection-outside");
+      }
+    });
+    nodeEls.forEach(node => {
+      const recordId = node.dataset.recordId || node.getAttribute("data-const-team") || node.getAttribute("data-person-id");
+      const cls = classifyNode(recordId, coreIds, neighborIds);
+      node.classList.add(cls);
+      if (recordId === selection.rid) node.classList.add("is-selected");
+    });
+    root.querySelectorAll(`[data-const-team="${CSS.escape(selection.rid)}"]`).forEach(el => el.classList.add("is-selected-team-row"));
+  } else if (selection?.type === "person") {
+    const coreIds = new Set([selection.rid]);
+    const neighborIds = new Set();
+    const selectedPersonNode = root.querySelector(`.ac-person-node[data-person-id="${CSS.escape(selection.rid)}"]`);
+    const selectedTeamId = selectedPersonNode?.getAttribute("data-person-team");
+    if (selectedTeamId) neighborIds.add(selectedTeamId);
+    edgeEls.forEach(edge => {
+      if (edge.classList.contains("ac-person-link")) {
+        const personId = edge.getAttribute("data-person");
+        const teamId = edge.getAttribute("data-team");
+        const personA = edge.getAttribute("data-person-a");
+        const personB = edge.getAttribute("data-person-b");
+        if (personId === selection.rid || personA === selection.rid || personB === selection.rid) {
+          edge.classList.add("is-selection-edge");
+          if (teamId) neighborIds.add(teamId);
+          if (personA && personA !== selection.rid) neighborIds.add(personA);
+          if (personB && personB !== selection.rid) neighborIds.add(personB);
+        } else {
+          edge.classList.add("is-selection-outside");
+        }
+        return;
+      }
+      edge.classList.add("is-selection-outside");
+    });
+    nodeEls.forEach(node => {
+      const recordId = node.dataset.recordId || node.getAttribute("data-const-team") || node.getAttribute("data-person-id");
+      const cls = classifyNode(recordId, coreIds, neighborIds);
+      node.classList.add(cls);
+      if (recordId === selection.rid) node.classList.add("is-selected");
+    });
+  } else if (selection?.type === "edge") {
+    const coreIds = new Set([selection.from, selection.to]);
+    const neighborIds = new Set();
+    edgeEls.forEach(edge => {
+      const a = edge.dataset.a;
+      const b = edge.dataset.b;
+      const exact = a === selection.from && b === selection.to;
+      const touches = coreIds.has(a) || coreIds.has(b);
+      if (exact) {
+        edge.classList.add("is-selected", "is-selection-edge");
+      } else if (touches) {
+        edge.classList.add("is-selection-adjacent-edge");
+        if (!coreIds.has(a)) neighborIds.add(a);
+        if (!coreIds.has(b)) neighborIds.add(b);
+      } else {
+        edge.classList.add("is-selection-outside");
+      }
+    });
+    nodeEls.forEach(node => {
+      const recordId = node.dataset.recordId || node.getAttribute("data-const-team") || node.getAttribute("data-person-id");
+      const cls = classifyNode(recordId, coreIds, neighborIds);
+      node.classList.add(cls);
+      if (coreIds.has(recordId)) node.classList.add("is-selected");
+    });
+  }
+}
+
+function setConstellationEdgeHover(stage, from, to, on) {
+  if (!stage) return;
+  if (!on) {
+    stage.removeAttribute("data-hover-active");
+    stage.querySelectorAll(".ac-edge.is-hot, .ac-edge.is-far").forEach(e => e.classList.remove("is-hot", "is-far"));
+    stage.querySelectorAll(".ac-node-group.is-related, .ac-node-group.is-far").forEach(e => e.classList.remove("is-related", "is-far"));
+    return;
+  }
+  stage.setAttribute("data-hover-active", "true");
+  stage.querySelectorAll(".ac-edge.is-hot, .ac-edge.is-far").forEach(e => e.classList.remove("is-hot", "is-far"));
+  stage.querySelectorAll(".ac-node-group.is-related, .ac-node-group.is-far").forEach(e => e.classList.remove("is-related", "is-far"));
+  stage.querySelectorAll(`.ac-edge[data-a="${CSS.escape(from)}"][data-b="${CSS.escape(to)}"]`).forEach(e => e.classList.add("is-hot"));
+  stage.querySelectorAll(`.ac-node-group[data-record-id="${CSS.escape(from)}"], .ac-node-group[data-record-id="${CSS.escape(to)}"]`).forEach(g => g.classList.add("is-related"));
+}
+
+function wireConstellationModeNav() {
+  const modes = new Set(["clusters", "dependencies", "journey", "collab"]);
+  for (const btn of state.canvas.querySelectorAll(".alch-const-mode-btn[data-const-mode]")) {
+    btn.addEventListener("click", () => {
+      const next = btn.dataset.constMode;
+      if (!modes.has(next)) return;
+      if (state.mode === "constellation" && next === state.constellationMode) return;
+      if (state.mode === "collab" && next === "collab") return;
+      state.mode = "constellation";
+      state.constellationMode = next;
+      try { localStorage.setItem(ALCHEMY_LS_KEY, next === "collab" ? "collab" : "constellation"); } catch {}
+      syncRailSelection();
+      render();
+    });
+  }
 }
 function setConstellationHover(stage, recordId, on) {
   if (!on) {
     stage.removeAttribute("data-hover-active");
-    stage.querySelectorAll(".ac-edge.is-hot").forEach(e => e.classList.remove("is-hot"));
-    stage.querySelectorAll(".ac-node-group.is-related").forEach(e => e.classList.remove("is-related"));
+    stage.querySelectorAll(".ac-edge.is-hot, .ac-edge.is-far").forEach(e => e.classList.remove("is-hot", "is-far"));
+    stage.querySelectorAll(".ac-node-group.is-related, .ac-node-group.is-far").forEach(e => e.classList.remove("is-related", "is-far"));
     return;
   }
   stage.setAttribute("data-hover-active", "true");
-  // light up edges touching this node, collect related nodes.
+  const edgeEls = [...stage.querySelectorAll(".ac-edge")];
   const related = new Set();
-  stage.querySelectorAll(".ac-edge").forEach(edge => {
-    const a = edge.dataset.a, b = edge.dataset.b;
-    if (a === recordId || b === recordId) {
-      edge.classList.add("is-hot");
-      related.add(a); related.add(b);
-    } else {
-      edge.classList.remove("is-hot");
+  edgeEls.forEach(e => {
+    const a = e.dataset.a, b = e.dataset.b;
+    const direct = a === recordId || b === recordId;
+    e.classList.toggle("is-hot", direct);
+    e.classList.remove("is-far");
+    if (direct) {
+      if (a && a !== recordId) related.add(a);
+      if (b && b !== recordId) related.add(b);
     }
   });
   stage.querySelectorAll(".ac-node-group").forEach(g => {
     const rid = g.dataset.recordId;
-    if (related.has(rid) && rid !== recordId) g.classList.add("is-related");
-    else g.classList.remove("is-related");
+    g.classList.toggle("is-related", related.has(rid));
+    g.classList.remove("is-far");
+  });
+}
+function setConstellationPersonHover(stage, personId, on) {
+  if (!stage) return;
+  if (!on) {
+    stage.removeAttribute("data-hover-active");
+    stage.querySelectorAll(".ac-person-link.is-hot").forEach(e => e.classList.remove("is-hot"));
+    stage.querySelectorAll(".ac-person-node.is-related, .ac-project-anchor.is-related, .ac-person-well.is-related").forEach(e => e.classList.remove("is-related"));
+    return;
+  }
+  stage.setAttribute("data-hover-active", "true");
+  const teams = new Set();
+  const people = new Set([personId]);
+  stage.querySelectorAll(".ac-person-link").forEach(edge => {
+    const personA = edge.getAttribute("data-person-a");
+    const personB = edge.getAttribute("data-person-b");
+    const direct = edge.getAttribute("data-person") === personId || personA === personId || personB === personId;
+    edge.classList.toggle("is-hot", direct);
+    if (direct) teams.add(edge.getAttribute("data-team"));
+    if (direct && personA) people.add(personA);
+    if (direct && personB) people.add(personB);
+  });
+  stage.querySelectorAll(".ac-person-node").forEach(node => {
+    const related = people.has(node.getAttribute("data-person-id"));
+    node.classList.toggle("is-related", related);
+    if (related && node.getAttribute("data-person-team")) teams.add(node.getAttribute("data-person-team"));
+  });
+  stage.querySelectorAll(".ac-project-anchor[data-const-team]").forEach(anchor => {
+    anchor.classList.toggle("is-related", teams.has(anchor.getAttribute("data-const-team")));
+  });
+  stage.querySelectorAll(".ac-person-well[data-const-team]").forEach(group => {
+    group.classList.toggle("is-related", teams.has(group.getAttribute("data-const-team")));
+  });
+}
+function setConstellationPersonProjectHover(stage, teamId, on) {
+  if (!stage) return;
+  if (!on) {
+    stage.removeAttribute("data-hover-active");
+    stage.querySelectorAll(".ac-person-link.is-hot").forEach(e => e.classList.remove("is-hot"));
+    stage.querySelectorAll(".ac-person-node.is-related, .ac-project-anchor.is-related, .ac-person-well.is-related").forEach(e => e.classList.remove("is-related"));
+    return;
+  }
+  stage.setAttribute("data-hover-active", "true");
+  const people = new Set();
+  stage.querySelectorAll(".ac-person-link").forEach(edge => {
+    const personA = edge.getAttribute("data-person-a");
+    const personB = edge.getAttribute("data-person-b");
+    const aTeam = personA ? stage.querySelector(`.ac-person-node[data-person-id="${CSS.escape(personA)}"]`)?.getAttribute("data-person-team") : "";
+    const bTeam = personB ? stage.querySelector(`.ac-person-node[data-person-id="${CSS.escape(personB)}"]`)?.getAttribute("data-person-team") : "";
+    const direct = edge.getAttribute("data-team") === teamId || aTeam === teamId || bTeam === teamId;
+    edge.classList.toggle("is-hot", direct);
+    if (direct) people.add(edge.getAttribute("data-person"));
+    if (direct && personA) people.add(personA);
+    if (direct && personB) people.add(personB);
+  });
+  stage.querySelectorAll(".ac-project-anchor[data-const-team]").forEach(anchor => {
+    anchor.classList.toggle("is-related", anchor.getAttribute("data-const-team") === teamId);
+  });
+  stage.querySelectorAll(".ac-person-well[data-const-team]").forEach(group => {
+    group.classList.toggle("is-related", group.getAttribute("data-const-team") === teamId);
+  });
+  stage.querySelectorAll(".ac-person-node").forEach(node => {
+    const primary = node.getAttribute("data-person-team") === teamId;
+    const secondary = (node.getAttribute("data-person-secondary-teams") || "").split(/\s+/).includes(teamId);
+    node.classList.toggle("is-related", primary || secondary || people.has(node.getAttribute("data-person-id")));
   });
 }
 
@@ -1944,6 +6288,7 @@ function setConstellationHover(stage, recordId, on) {
 function showJourneyTip(stage, tip, rec) {
   if (!tip || !rec) return;
   const j = journeyFor(rec);
+  const assessed = journeyAssessed(rec);
   const stageLbl = JOURNEY_STAGE_LABELS[j.stage] || "—";
   const evLbl = JOURNEY_EVIDENCE_LABELS[j.evidence_quality] || "—";
   const milestone = j.next_milestone
@@ -1951,6 +6296,7 @@ function showJourneyTip(stage, tip, rec) {
     : "";
   tip.innerHTML = `
     <div class="ajt-name">${escHtml(rec.name || rec.record_id)}</div>
+    <div class="ajt-row"><span class="ajt-k">source</span><span class="ajt-v">${escHtml(assessed ? "explicit PMF read" : "missing journey data")}</span></div>
     <div class="ajt-row"><span class="ajt-k">stage</span><span class="ajt-v">${j.stage} · ${escHtml(stageLbl)}</span></div>
     <div class="ajt-row"><span class="ajt-k">evidence</span><span class="ajt-v">${j.evidence_quality} · ${escHtml(evLbl)}</span></div>
     <div class="ajt-row"><span class="ajt-k">bottleneck</span><span class="ajt-v">${escHtml(j.primary_bottleneck)}</span></div>
@@ -1958,7 +6304,7 @@ function showJourneyTip(stage, tip, rec) {
   `;
   tip.hidden = false;
 }
-function positionJourneyTip(stage, tip, e) {
+function positionConstTip(stage, tip, e) {
   if (!tip || tip.hidden) return;
   const r = stage.getBoundingClientRect();
   let x = e.clientX - r.left + 14;
@@ -2174,7 +6520,7 @@ function renderCalAvailability() {
           <button id="cal-export-png" class="cal-action" type="button">export png</button>
           <button id="cal-export-pdf" class="cal-action" type="button">export pdf</button>
           <button class="alch-feed-btn cal-avail-edit" type="button" data-cal-go-profile="1" title="edit your dates_start, dates_end, absences in your person record">
-            <span aria-hidden="true">✎</span><span>edit my availability</span>
+            <span class="alch-edit-glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"/></svg></span><span>edit my availability</span>
           </button>
         </div>
       </header>
@@ -3131,7 +7477,7 @@ function renderProgramPage(current) {
       <header class="alch-prog-page-head">
         <h2 class="alch-prog-page-title">${escHtml(current.title || current.record_id)}</h2>
         <button class="alch-feed-btn alch-prog-edit" type="button" data-edit-path="${escAttr(editPath)}" title="opens github's web editor (PR-only)">
-          <span aria-hidden="true">✎</span>
+          <span class="alch-edit-glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"/></svg></span>
           <span>edit this page</span>
         </button>
       </header>
@@ -3246,7 +7592,7 @@ function currentAskContext() {
   const askIdentity = { identity: getIdentity(), profileUser: me, people };
   const myPerson = resolveAskIdentityPerson(askIdentity);
   const myHandle = normalizeAskIdentity(me.github || me.gh_handle || me.handle || me.links?.github);
-  const authorSlug = myPerson?.record_id || me.record_id || (myHandle ? myHandle : "your-slug");
+  const authorSlug = myPerson?.record_id || "your-slug";
   return { people, me, askIdentity, myPerson, myHandle, authorSlug };
 }
 
@@ -3259,13 +7605,13 @@ function currentAskContext() {
 // seeking↔offering term overlap, shown as chips so every match is legible.
 function collabCell(R, C, ri, ci, m) {
   if (R.rid === C.rid) return `<div class="cb-cell cb-diag" data-row="${ri}" data-col="${ci}" aria-hidden="true"></div>`;
-  const dep = m.deps.has(R.rid + ">" + C.rid);
+  const dep = m.depByPair?.get(dependencyPairKey(R.rid, C.rid));
   const so = m.soByPair.get(R.rid + ">" + C.rid);
   const af = m.aff.get(collabAffKey(R.rid, C.rid));
   let cls = "cb-cell", mark = "", title = "", has = false;
   if (af) { cls += " has-aff"; has = true; mark = "·"; title = `${R.team.name} ↔ ${C.team.name} — shares ${af.shared.join(", ") || "interests"}${af.endorsed ? " · endorsed pairing" : ""}`; }
   if (so) { cls += " has-so s" + Math.min(4, so.score); has = true; mark = "◆"; title = `${R.team.name} seeks → ${C.team.name} offers — ${so.shared.join(", ")}`; }
-  if (dep) { cls += " has-dep"; has = true; mark = "▲"; title = `${R.team.name} depends on ${C.team.name}`; }
+  if (dep) { cls += " has-dep"; has = true; mark = "▲"; title = `${R.team.name} ${dep.relation_label || "links to"} ${C.team.name}`; }
   if (!has) return `<div class="cb-cell" data-row="${ri}" data-col="${ci}"></div>`;
   return `<button type="button" class="${cls}" data-row="${ri}" data-col="${ci}" data-collab-open="${escAttr(C.rid)}" title="${escAttr(title)}"><span class="cb-mark">${mark}</span></button>`;
 }
@@ -3274,10 +7620,15 @@ function renderCollab() {
   const teams = (state.cohort?.teams || []).filter(t => t && t.record_id);
   const clusters = state.cohort?.clusters || [];
   if (!teams.length) {
-    state.canvas.innerHTML = `<header class="alch-cb-head"><h2 class="alch-cb-title">collaboration board</h2></header><p class="alch-callout">no team data yet.</p>`;
+    state.canvas.innerHTML = `
+      <div class="alch-collab">
+        ${constellationModeNavHtml("collab")}
+        <header class="alch-cb-head"><h2 class="alch-cb-title">collaboration board</h2></header>
+        <p class="alch-callout">no team data yet.</p>
+      </div>`;
     return;
   }
-  const m = buildCollabModel(teams, clusters);
+  const m = buildCollabModel(teams, clusters, state.cohort?.dependencies || []);
   const ordered = m.ordered;
   const N = ordered.length;
   const colN = `--cb-cols:${N}`;
@@ -3286,7 +7637,7 @@ function renderCollab() {
   let headCells = `<div class="cb-corner" aria-hidden="true">seeks ↓ · offers →</div>`;
   ordered.forEach((o, ci) => {
     const deg = m.indegree.get(o.rid) || 0;
-    headCells += `<button type="button" class="cb-colhead${deg >= 5 ? " is-key" : ""}" data-col="${ci}" data-collab-open="${escAttr(o.rid)}" title="${escAttr(o.team.name + " — " + deg + " teams depend on it")}"><span>${escHtml(o.team.name)}</span></button>`;
+    headCells += `<button type="button" class="cb-colhead${deg >= 5 ? " is-key" : ""}" data-col="${ci}" data-collab-open="${escAttr(o.rid)}" title="${escAttr(o.team.name + " — " + deg + " inbound relationships")}"><span>${escHtml(o.team.name)}</span></button>`;
   });
   let rows = `<div class="cb-row cb-headrow" style="${colN}">${headCells}</div>`;
   ordered.forEach((R, ri) => {
@@ -3298,7 +7649,7 @@ function renderCollab() {
     <section class="alch-cb-section">
       <div class="alch-cb-sechead"><h3>adjacency matrix</h3>
         <div class="cb-legend">
-          <span><i class="cb-sw dep"></i>depends on</span>
+          <span><i class="cb-sw dep"></i>declared link</span>
           <span><i class="cb-sw so"></i>seeks → offers</span>
           <span><i class="cb-sw aff"></i>shared skill area</span>
           <span><i class="cb-sw key"></i>keystone column</span>
@@ -3350,11 +7701,12 @@ function renderCollab() {
 
   state.canvas.innerHTML = `
     <div class="alch-collab">
+      ${constellationModeNavHtml("collab")}
       <header class="alch-cb-head">
         <h2 class="alch-cb-title">collaboration board</h2>
-        <p class="alch-cb-sub">who depends on whom, who can unblock whom, where the cohort over-concentrates — all from teams' own declared dependencies, seeking, offering &amp; skill areas.</p>
+        <p class="alch-cb-sub">who is explicitly linked, who can unblock whom, where the cohort over-concentrates — all from teams' own declared relationships, seeking, offering &amp; skill areas.</p>
         <div class="alch-cb-stats">
-          <span><strong>${m.deps.size}</strong> dependencies</span>
+          <span><strong>${m.deps.size}</strong> relationships</span>
           <span><strong>${m.seekOffer.length}</strong> seek ↔ offer overlaps</span>
           <span><strong>${m.aff.size}</strong> shared affinities</span>
           <span><strong>${m.convergence.length}</strong> convergence areas</span>
@@ -3368,6 +7720,7 @@ function renderCollab() {
 }
 
 function wireCollab() {
+  wireConstellationModeNav();
   for (const el of state.canvas.querySelectorAll("[data-collab-cohort-open]")) {
     const activate = (event) => {
       event?.preventDefault?.();
@@ -3420,6 +7773,7 @@ function renderAsks() {
     const verb = String(a.verb || "ask").trim();
     const verbGlyph = Array.from(verb)[0] || "·";
     const verbLabel = Array.from(verb).slice(1).join("").trim() || verb;
+    const verbVars = askVerbVars(verbGlyph);
     const statusBadge = status === "claimed" ? `<span class="alch-asks-status alch-asks-status-claimed">claimed</span>`
                       : status === "done"    ? `<span class="alch-asks-status alch-asks-status-done">done</span>`
                       : a._expired           ? `<span class="alch-asks-status alch-asks-status-fading">fading</span>`
@@ -3448,7 +7802,7 @@ function renderAsks() {
     return `
       <details class="alch-asks-card" data-expired="${a._expired ? "1" : "0"}" data-asks-record="${escAttr(a.record_id)}">
         <summary class="alch-asks-summary">
-          <span class="alch-asks-verb" title="${escAttr(verb)}" aria-label="${escAttr(verbLabel)}">${escHtml(verbGlyph)}</span>
+          <span class="alch-asks-verb${verbVars ? " has-verb-color" : ""}"${verbVars ? ` style="${verbVars}"` : ""} title="${escAttr(verb)}" aria-label="${escAttr(verbLabel)}">${askVerbIconSvg(verbGlyph) || escHtml(verbGlyph)}</span>
           <span class="alch-asks-body">
             <span class="alch-asks-topic" title="${escAttr(topic)}">${escHtml(topic)}</span>
             <span class="alch-asks-meta">
@@ -3500,11 +7854,16 @@ function renderAsks() {
     "📣 looking for",
     "🪛 help me debug",
   ];
-  const askVerbPills = ASK_VERB_OPTIONS.map((v, i) => `
-    <button class="alch-asks-verb-pill" type="button" data-asks-verb="${escAttr(v)}" aria-pressed="${i === 0 ? "true" : "false"}">
-      ${escHtml(v)}
-    </button>
-  `).join("");
+  const askVerbPills = ASK_VERB_OPTIONS.map((v, i) => {
+    const glyph = Array.from(v)[0] || "";
+    const label = Array.from(v).slice(1).join("").trim() || v;
+    const icon = askVerbIconSvg(glyph);
+    const vars = askVerbVars(glyph);
+    return `
+    <button class="alch-asks-verb-pill${vars ? " has-verb-color" : ""}"${vars ? ` style="${vars}"` : ""} type="button" data-asks-verb="${escAttr(v)}" aria-pressed="${i === 0 ? "true" : "false"}">
+      ${icon ? `<span class="alch-asks-verb-pill-icon" aria-hidden="true">${icon}</span>` : ""}<span class="alch-asks-verb-pill-label">${escHtml(label)}</span>
+    </button>`;
+  }).join("");
   const openComposer = state.openAskComposer === true;
   state.openAskComposer = false;
 
@@ -3544,7 +7903,11 @@ function renderAsks() {
           </div>
           <div class="alch-asks-compose-row">
             <button class="alch-feed-btn alch-asks-compose-submit" type="submit">submit → open PR</button>
-            <span class="alch-asks-compose-author">posting as <strong>${escHtml(authorSlug)}</strong>${myHandle && authorSlug !== myHandle ? ` · @${escHtml(myHandle)}` : ""}</span>
+            <span class="alch-asks-compose-author">${
+              authorSlug === "your-slug"
+                ? "claim your cohort profile before posting"
+                : `posting as <strong>${escHtml(authorSlug)}</strong>${myHandle && authorSlug !== myHandle ? ` · @${escHtml(myHandle)}` : ""}`
+            }</span>
           </div>
           <div class="alch-asks-compose-result" hidden></div>
         </div>
@@ -3695,6 +8058,12 @@ async function submitAskCompose(form) {
   const result     = form.querySelector(".alch-asks-compose-result");
   if (!result) return;
 
+  if (authorSlug === "your-slug") {
+    result.hidden = false;
+    result.innerHTML = `<p class="alch-onb-inline-line alch-onb-inline-err">claim your cohort profile before posting an ask.</p>`;
+    return;
+  }
+
   if (!topic) {
     result.hidden = false;
     result.innerHTML = `<p class="alch-onb-inline-line alch-onb-inline-err">type a topic first.</p>`;
@@ -3724,7 +8093,7 @@ record_id: ${recordId}
 record_type: ask
 schema_version: 1
 posted_at: ${todayIso}
-author: ${authorSlug}
+author: ${quoteYaml(authorSlug)}
 verb: ${quoteYaml(verb)}
 topic: ${yamlScalar(topic, 2)}
 ${tagsBlock}
@@ -4033,14 +8402,16 @@ function contextMiniHash(s) {
 function contextSkillBlock(skillAreas) {
   const skills = (skillAreas || []).map(s => String(s).trim()).filter(Boolean);
   return skills.length
-    ? "skill_areas:\n" + skills.map(s => `  - ${s}`).join("\n")
+    ? "skill_areas:\n" + skills.map(s => `  - ${quoteYaml(s)}`).join("\n")
     : "skill_areas: []";
 }
 
 function contextAuthorSlug() {
+  const people = state.cohort?.people || [];
   const me = state.profile?.user || {};
-  const gh = String(me.github || "").toLowerCase();
-  return me.record_id || (gh ? gh : "your-slug");
+  const askIdentity = { identity: getIdentity(), profileUser: me, people };
+  const myPerson = resolveAskIdentityPerson(askIdentity);
+  return myPerson?.record_id || "your-slug";
 }
 
 function contextSelectedDigest(source) {
@@ -4181,10 +8552,18 @@ function renderContextVaultDetail(selected) {
         <div>
           <span class="alch-cv-eyebrow">reader draft · markdown</span>
         </div>
-        <button class="alch-cv-md-action" type="button" data-cv-copy-article="${escAttr(selected.id)}" title="copy ${escAttr(selectedMdFile)}">
-          <span class="alch-cv-md-action-label">copy .md</span>
-          <span class="alch-cv-md-action-file">${escHtml(selectedMdFile)}</span>
-        </button>
+        <div class="alch-cv-detail-actions">
+          <button class="alch-cv-md-action" type="button" data-cv-copy-article="${escAttr(selected.id)}" title="copy ${escAttr(selectedMdFile)}">
+            <span class="alch-cv-md-action-label">copy .md</span>
+            <span class="alch-cv-md-action-file">${escHtml(selectedMdFile)}</span>
+          </button>
+          <button class="alch-cv-md-action" type="button" data-cv-promote="ask" data-cv-source-id="${escAttr(selected.id)}" title="open an ask PR for this article">
+            <span class="alch-cv-md-action-label">ask PR</span>
+          </button>
+          <button class="alch-cv-md-action" type="button" data-cv-promote="program" data-cv-source-id="${escAttr(selected.id)}" title="open a program PR for this article">
+            <span class="alch-cv-md-action-label">program PR</span>
+          </button>
+        </div>
       </header>
       ${renderContextReaderHtml(selected)}
       <div class="alch-cv-result" data-cv-result hidden></div>
@@ -4205,8 +8584,78 @@ function contextRawScriptMeta(source) {
   const bits = [];
   if (source?.date) bits.push(source.date);
   if (source?.line_count) bits.push(`${source.line_count} lines`);
+  if (source?.review_status) bits.push(source.review_status.replace(/-/g, " "));
   if (source?.source_kind) bits.push(source.source_kind.replace(/-/g, " "));
   return bits.join(" · ");
+}
+
+function contextList(value) {
+  if (Array.isArray(value)) return value.map(v => String(v || "").trim()).filter(Boolean);
+  if (!value) return [];
+  return String(value).split(",").map(v => v.trim()).filter(Boolean);
+}
+
+function contextTeamRecord(id) {
+  return (state.cohort?.teams || []).find(team => team?.record_id === id) || null;
+}
+
+function contextPersonRecord(id) {
+  return (state.cohort?.people || []).find(person => person?.record_id === id) || null;
+}
+
+function contextTeamKind(id) {
+  const team = contextTeamRecord(id);
+  return team?.kind === "project" ? "project" : "team";
+}
+
+function renderContextRecordChip({ kind, id, label }) {
+  if (!id) return "";
+  return `
+    <button class="alch-cv-rel-chip" type="button"
+            data-cv-record-kind="${escAttr(kind)}"
+            data-cv-record-id="${escAttr(id)}">
+      <span>${escHtml(kind)}</span>${escHtml(label || id)}
+    </button>
+  `;
+}
+
+function renderContextRawMap(source) {
+  if (!source) return "";
+  const teams = contextList(source.related_teams);
+  const people = contextList(source.related_people);
+  const calendar = contextList(source.calendar_matches);
+  const utility = source.utility || "";
+  const boundary = source.content_boundary || source.import_boundary || "";
+  if (!teams.length && !people.length && !calendar.length && !utility && !boundary) return "";
+
+  const teamChips = teams.map(id => {
+    const team = contextTeamRecord(id);
+    return renderContextRecordChip({
+      kind: contextTeamKind(id),
+      id,
+      label: team?.name || id,
+    });
+  }).join("");
+  const personChips = people.map(id => {
+    const person = contextPersonRecord(id);
+    return renderContextRecordChip({
+      kind: "person",
+      id,
+      label: person?.name || id,
+    });
+  }).join("");
+  const calendarTags = calendar.map(match => `<span class="alch-cv-rel-tag">${escHtml(match)}</span>`).join("");
+
+  return `
+    <section class="alch-cv-raw-map" aria-label="transcript review map">
+      ${source.submit_recommendation ? `<p class="alch-cv-raw-map-status">${escHtml(source.submit_recommendation)}</p>` : ""}
+      ${calendarTags ? `<div class="alch-cv-rel-row"><strong>calendar</strong><div>${calendarTags}</div></div>` : ""}
+      ${teamChips ? `<div class="alch-cv-rel-row"><strong>teams</strong><div>${teamChips}</div></div>` : ""}
+      ${personChips ? `<div class="alch-cv-rel-row"><strong>people</strong><div>${personChips}</div></div>` : ""}
+      ${utility ? `<div class="alch-cv-rel-row"><strong>useful for</strong><p>${escHtml(utility)}</p></div>` : ""}
+      ${boundary ? `<div class="alch-cv-rel-row"><strong>boundary</strong><p>${escHtml(boundary)}</p></div>` : ""}
+    </section>
+  `;
 }
 
 function renderContextVaultRawDetail(selected) {
@@ -4241,6 +8690,7 @@ function renderContextVaultRawDetail(selected) {
       <article class="alch-cv-reader alch-cv-raw-reader">
         <p class="alch-cv-reader-kicker">${escHtml(contextRawScriptMeta(selected) || "source transcript")}</p>
         <h1>${escHtml(title)}</h1>
+        ${renderContextRawMap(selected)}
       </article>
       <pre class="alch-cv-raw-text">${escHtml(displayText)}</pre>
       <div class="alch-cv-result" data-cv-result hidden></div>
@@ -4281,6 +8731,9 @@ function flashCopyButton(btn, ok = true) {
 function buildContextAskMarkdown(source) {
   const todayIso = new Date().toISOString().slice(0, 10);
   const author = contextAuthorSlug();
+  if (author === "your-slug") {
+    return { error: "claim your cohort profile before promoting this article as an ask." };
+  }
   const title = contextArticleTitle(source);
   const topic = `Draft Shape Rotator article: ${title}`;
   const recordId = `${author}-${todayIso}-context-${contextMiniHash(source.id + topic)}`;
@@ -4291,7 +8744,7 @@ record_id: ${recordId}
 record_type: ask
 schema_version: 1
 posted_at: ${todayIso}
-author: ${author}
+author: ${quoteYaml(author)}
 verb: "🔬 brain on"
 topic: ${yamlScalar(topic, 2)}
 ${contextSkillBlock(source.skill_areas)}
@@ -4447,6 +8900,16 @@ function wireContextVaultDetailActions(root = state.canvas) {
       if (window.api?.revealContextVaultSource) await window.api.revealContextVaultSource(btn.dataset.cvRevealSource);
     });
   }
+  for (const btn of root.querySelectorAll("[data-cv-record-id]")) {
+    btn.addEventListener("click", () => {
+      if (typeof window.__srwkOpenProfile !== "function") return;
+      window.__srwkOpenProfile({
+        kind: btn.dataset.cvRecordKind || "person",
+        record_id: btn.dataset.cvRecordId,
+        mode: "edit",
+      });
+    });
+  }
   for (const btn of root.querySelectorAll("[data-cv-copy-article]")) {
     btn.addEventListener("click", async () => {
       const source = contextSourceById(btn.dataset.cvCopyArticle);
@@ -4487,6 +8950,13 @@ function wireContextVaultDetailActions(root = state.canvas) {
       const draft = btn.dataset.cvPromote === "program"
         ? buildContextProgramMarkdown(source)
         : buildContextAskMarkdown(source);
+      if (draft.error) {
+        if (result) {
+          result.hidden = false;
+          result.innerHTML = `<p class="alch-onb-inline-line alch-onb-inline-err">${escHtml(draft.error)}</p>`;
+        }
+        return;
+      }
       const launched = await launchPRFlow({ kind: "new", path: draft.path, value: draft.markdown });
       if (result) {
         result.hidden = false;
@@ -5093,19 +9563,92 @@ function announceExport(r) {
 // hero (shape glyph + name + kind), about, credentials, links, members,
 // synergy clusters. Entered by clicking a card; back button returns to
 // the previous mode (typically shapes).
+// ─── #203 cohort-intel detail helpers — dropped during mega-merge (-X ours); restored ───
+function detailItems(value) {
+  if (Array.isArray(value)) return value.map(v => String(v || "").trim()).filter(Boolean);
+  if (typeof value === "string" && value.trim()) return [value.trim()];
+  return [];
+}
+
+function detailList(items, opts = {}) {
+  const vals = detailItems(items);
+  if (!vals.length) return "";
+  const cls = opts.compact ? " alch-detail-list-compact" : "";
+  return `<ul class="alch-detail-list${cls}">${vals.map(v => `<li>${escHtml(v)}</li>`).join("")}</ul>`;
+}
+
+function detailChips(items, opts = {}) {
+  const vals = detailItems(items);
+  if (!vals.length) return "";
+  const cls = opts.muted ? " alch-detail-chips-muted" : "";
+  return `<div class="alch-detail-chips${cls}">${vals.map(v => `<span class="alch-detail-chip">${escHtml(v)}</span>`).join("")}</div>`;
+}
+
+function detailRows(rows) {
+  return rows
+    .filter(r => r && r.value)
+    .map(r => `<div class="alch-detail-row"><span class="adr-k">${escHtml(r.key)}</span><span class="adr-v">${r.value}</span></div>`)
+    .join("");
+}
+
+function renderDetailSection(title, rows, aux = "") {
+  const body = detailRows(rows);
+  if (!body) return "";
+  return `
+    <section class="alch-detail-section">
+      <h3 class="alch-detail-h">${escHtml(title)}${aux ? ` <span class="alch-profile-h-aux">${escHtml(aux)}</span>` : ""}</h3>
+      ${body}
+    </section>
+  `;
+}
+
+function renderDependencyLinks(ids) {
+  const vals = detailItems(ids);
+  if (!vals.length) return "";
+  const teamsById = new Map((state.cohort?.teams || []).map(t => [t.record_id, t]));
+  return `<ul class="alch-detail-list alch-detail-list-compact">${vals.map(id => {
+    const t = teamsById.get(id);
+    const label = t ? (t.name || t.record_id) : id;
+    const role = t ? teamKind(t) : "record";
+    return `<li><button type="button" class="alch-detail-inline-link" data-person="${escAttr(id)}">${escHtml(label)}</button> <span class="adl-role">${escHtml(role)}</span></li>`;
+  }).join("")}</ul>`;
+}
+
 function renderDetail(recordId) {
-  const cohortIndex = buildCohortIndex(state.cohort);
+  const cohortIndex = buildCohortIndex(activeDetailCohort());
   const team = cohortIndex.teamById.get(recordId);
   if (team) return renderTeamDetail(team);
   const person = cohortIndex.personById.get(recordId);
   if (person) return renderPersonDetail(person);
+  if (state.detailReturnMode === "constellation") return renderTimelineMissingDetail(recordId);
   // Record vanished (e.g. cohort republished, slug changed). Bail out
   // back to the grid rather than showing an empty page.
   closeDetail();
 }
 
+function renderTimelineMissingDetail(recordId) {
+  const snapshot = activeConstellationSnapshot();
+  const label = snapshot?.label || "selected snapshot";
+  state.canvas.innerHTML = `
+    <header class="alch-detail-bar">
+      <button class="alch-detail-back" type="button" id="alch-detail-back" aria-label="back to constellation">
+        <span aria-hidden="true">←</span>
+        <span>back</span>
+      </button>
+      <div class="alch-detail-bar-tag">
+        <span>${escHtml(String(recordId || "").toUpperCase())}</span>
+        <span class="ct-sep">·</span>
+        <span>${escHtml(label)}</span>
+      </div>
+    </header>
+    ${renderConstellationTimelineControls({ compact: true })}
+    <p class="alch-callout"><strong>not declared at this snapshot</strong><br/>This record is absent from the public cohort surface for ${escHtml(label)}.</p>
+  `;
+  state.canvas.querySelector("#alch-detail-back")?.addEventListener("click", closeDetail);
+}
+
 function renderTeamDetail(team) {
-  const cohortIndex = buildCohortIndex(state.cohort);
+  const cohortIndex = buildCohortIndex(activeDetailCohort());
   const recordId = team.record_id;
   const s = shapeForTeam(team);
   const kind = teamKind(team);
@@ -5145,6 +9688,7 @@ function renderTeamDetail(team) {
       </div>
       <a href="${escHtml(editUrl)}" data-external class="alch-detail-edit" title="edit this record on github">edit on github →</a>
     </header>
+    ${state.detailReturnMode === "constellation" ? renderConstellationTimelineControls({ compact: true }) : ""}
 
     <article class="cohort-plate is-revealing" data-tier="${escAttr(tier.key)}" data-kind="${escAttr(kind)}" id="cohort-plate">
       <div class="plate-foil" aria-hidden="true"></div>
@@ -5158,7 +9702,7 @@ function renderTeamDetail(team) {
       <div class="plate-class">class: ${escHtml(klass)} <span class="pc-sep">//</span> order: ${escHtml(order)}${team.is_mentor ? ` <span class="pc-sep">//</span> mentor` : ""}</div>
 
       <section class="alch-detail-hero plate-hero">
-        <div class="alch-detail-shape">${s ? `<canvas data-shape-fam="${s.fam}" data-shape-kind="${escAttr(teamKind(team))}" data-shape-seed="${escAttr(team.record_id)}"></canvas>` : ""}</div>
+        <div class="alch-detail-shape">${s ? `<canvas data-shape-fam="${s.fam}" data-shape-kind="${escAttr(teamKind(team))}" data-shape-scale="1.3" data-shape-seed="${escAttr(team.record_id)}"></canvas>` : ""}</div>
         <div class="alch-detail-hero-text">
           <h2 class="alch-detail-name">${escHtml(team.name)}</h2>
           <p class="alch-detail-focus">${escHtml(team.focus || "—")}</p>
@@ -5176,6 +9720,7 @@ function renderTeamDetail(team) {
       <div class="alch-detail-grid">
         <section class="alch-detail-section">
           <h3 class="alch-detail-h">about</h3>
+          ${team.now ? `<div class="alch-detail-row"><span class="adr-k">now</span><span class="adr-v alch-detail-now">${escHtml(team.now)}</span></div>` : ""}
           <div class="alch-detail-row"><span class="adr-k">contributors</span><span class="adr-v">${teamPeople.length} ${teamPeople.length === 1 ? "person" : "people"}</span></div>
           ${team.traction ? `<div class="alch-detail-row"><span class="adr-k">traction</span><span class="adr-v">${escHtml(team.traction)}</span></div>` : ""}
         </section>
@@ -5190,10 +9735,22 @@ function renderTeamDetail(team) {
             <h3 class="alch-detail-h">trophies</h3>
             <div class="plate-trophies">
               ${team.hackathon_note ? `<span class="plate-trophy trophy-rare"><span class="ptr-mark">★</span><span class="ptr-body"><span class="ptr-grade">rare</span><span class="ptr-name">${escHtml(team.hackathon_note)}</span></span></span>` : ""}
-              ${team.paper_basis ? `<span class="plate-trophy trophy-notable"><span class="ptr-mark">◆</span><span class="ptr-body"><span class="ptr-grade">notable</span><span class="ptr-name">${escHtml(team.paper_basis)}</span></span></span>` : ""}
+              ${team.paper_basis ? `<span class="plate-trophy trophy-notable"><span class="ptr-mark">◆</span><span class="ptr-body"><span class="ptr-grade">notable</span><span class="ptr-name">${escHtml(constText(team.paper_basis))}</span></span></span>` : ""}
             </div>
           </section>
         ` : ""}
+
+        ${renderDetailSection("coordination", [
+          { key: "depends on", value: renderDependencyLinks(team.dependencies) },
+          { key: "seeking", value: detailList(team.seeking) },
+          { key: "offering", value: detailList(team.offering) },
+        ])}
+
+        ${renderDetailSection("capability", [
+          { key: "skills", value: detailChips(team.skill_areas) },
+          { key: "shipped", value: detailList(team.prior_shipping) },
+          { key: "success", value: detailChips(team.success_dimensions, { muted: true }) },
+        ])}
 
         <section class="alch-detail-section">
           <h3 class="alch-detail-h">links</h3>
@@ -5252,7 +9809,7 @@ function wirePlateFoil(plate) {
 }
 
 function renderPersonDetail(person) {
-  const cohortIndex = buildCohortIndex(state.cohort);
+  const cohortIndex = buildCohortIndex(activeDetailCohort());
   const recordId = person.record_id;
   const fam = Math.abs(hashStr(recordId || "_")) % 6;
   const team = cohortIndex.teamForPerson(person);
@@ -5281,9 +9838,10 @@ function renderPersonDetail(person) {
       </div>
       <a href="${escHtml(editUrl)}" data-external class="alch-detail-edit" title="edit this record on github">edit on github →</a>
     </header>
+    ${state.detailReturnMode === "constellation" ? renderConstellationTimelineControls({ compact: true }) : ""}
 
     <section class="alch-detail-hero">
-      <div class="alch-detail-shape"><canvas data-shape-fam="${fam}" data-shape-kind="person" data-shape-seed="${escAttr(recordId)}"></canvas></div>
+      <div class="alch-detail-shape"><canvas data-shape-fam="${fam}" data-shape-kind="person" data-shape-scale="1.3" data-shape-seed="${escAttr(recordId)}"></canvas></div>
       <div class="alch-detail-hero-text">
         <h2 class="alch-detail-name">${escHtml(person.name || recordId)}</h2>
         <p class="alch-detail-focus">${escHtml(person.role || "—")}</p>
@@ -5330,6 +9888,23 @@ function renderPersonDetail(person) {
           <div class="alch-detail-row"><span class="adr-v">${escHtml(person.dietary_restrictions)}</span></div>
         </section>
       ` : ""}
+
+      ${renderDetailSection("current work", [
+        { key: "now", value: person.now ? `<span class="alch-detail-now">${escHtml(person.now)}</span>` : "" },
+        { key: "skills", value: detailChips(person.skill_areas || person.skills) },
+      ])}
+
+      ${renderDetailSection("collaboration", [
+        { key: "ask about", value: detailList(person.go_to_them_for || person.offering) },
+        { key: "best in", value: detailList(person.best_contexts) },
+        { key: "seeking", value: detailList(person.seeking) },
+        { key: "style", value: person.working_style ? escHtml(person.working_style) : "" },
+      ])}
+
+      ${renderDetailSection("throughlines", [
+        { key: "themes", value: detailList(person.recurring_themes) },
+        { key: "prior work", value: detailList(person.prior_work) },
+      ])}
 
       <section class="alch-detail-section">
         <h3 class="alch-detail-h">links</h3>
@@ -5401,9 +9976,14 @@ function renderDetailLinks(L) {
 // ─── drawer (specimen detail) ────────────────────────────────────────
 function openDrawer(recordId) {
   if (!state.cohort) return;
-  const cohortIndex = buildCohortIndex(state.cohort);
+  const cohort = state.mode === "constellation" ? activeConstellationCohort() : state.cohort;
+  const cohortIndex = buildCohortIndex(cohort);
   const team = cohortIndex.teamById.get(recordId);
-  if (!team) return;
+  if (!team) {
+    if (state.mode === "constellation") closeDrawer();
+    return;
+  }
+  if (state.mode === "constellation") state.constellationDrawerRecordId = String(recordId);
 
   const { backdrop, drawer, body } = ensureDrawer();
   const s = shapeForTeam(team);
@@ -5454,6 +10034,34 @@ function openDrawer(recordId) {
   if (team.is_mentor) {
     tagBits.push(`<span>·</span>`, `<span>mentor</span>`);
   }
+  if (state.mode === "constellation") {
+    const snap = activeConstellationSnapshot();
+    if (snap?.label) tagBits.push(`<span>·</span>`, `<span>${escHtml(snap.label)}</span>`);
+  }
+
+  // Editorial section header — italic-serif title + terse lowercase sub-label,
+  // matching the collab board's .alch-cb-sechead.
+  const sechead = (title, sub) =>
+    `<div class="alch-drawer-sechead"><h4>${escHtml(title)}</h4>${sub ? `<span class="dr-sub">${escHtml(sub)}</span>` : ""}</div>`;
+
+  // Roster — primary contributors (person.team) + anyone who lists this team in
+  // secondary_teams. Rendered as gold-accent person chips (people read
+  // differently from teams/clusters — the collab shape-grammar).
+  const roster = (state.cohort.people || []).filter(p =>
+    p.team === team.record_id || (Array.isArray(p.secondary_teams) && p.secondary_teams.includes(team.record_id)));
+  const crewChips = roster.map(p => {
+    const role = p.role || (p.team === team.record_id ? "" : "contributor");
+    return `<span class="alch-drawer-person"><span class="dp-name">${escHtml(p.name || p.record_id)}</span>${role ? `<span class="dp-role">${escHtml(role)}</span>` : ""}</span>`;
+  }).join("");
+  const successChips = constSuccessDimensions(team).map(d => `<span class="alch-drawer-success">${escHtml(d)}</span>`).join("");
+  const opRows = [
+    ["now", team.now],
+    ["this week", team.weekly_goals],
+    ["graduation", team.graduation_target],
+    ["milestones", team.monthly_milestones],
+  ].filter(([, v]) => constText(v)).map(([k, v]) =>
+    `<div class="alch-drawer-row"><span class="dr-k">${escHtml(k)}</span><span class="dr-v">${escHtml(constText(v))}</span></div>`
+  ).join("");
 
   body.innerHTML = `
     <div class="alch-drawer-tag">${tagBits.join("")}</div>
@@ -5461,33 +10069,46 @@ function openDrawer(recordId) {
     <div class="alch-drawer-shape">${s ? shapeSvgByFam(s.fam, hashStr(team.record_id)) : ""}</div>
     <div class="alch-drawer-rule"></div>
     <section class="alch-drawer-section">
-      <h4>about</h4>
+      ${sechead("about", "focus · size · geo")}
       <div class="alch-drawer-row"><span class="dr-k">focus</span><span class="dr-v">${escHtml(team.focus || "—")}</span></div>
       <div class="alch-drawer-row"><span class="dr-k">team</span><span class="dr-v">${m} ${m === 1 ? "person" : "people"}</span></div>
       <div class="alch-drawer-row"><span class="dr-k">geo</span><span class="dr-v">${escHtml(team.geo || "—")}</span></div>
       ${team.traction ? `<div class="alch-drawer-row"><span class="dr-k">traction</span><span class="dr-v">${escHtml(team.traction)}</span></div>` : ""}
     </section>
+    ${crewChips ? `
+      <section class="alch-drawer-section">
+        ${sechead("crew", "who to talk to")}
+        <div class="alch-drawer-people">${crewChips}</div>
+      </section>
+    ` : ""}
+    ${successChips || opRows ? `
+      <section class="alch-drawer-section">
+        ${sechead("operating model", "success vector · current proof")}
+        ${successChips ? `<div class="alch-drawer-successes">${successChips}</div>` : ""}
+        ${opRows}
+      </section>
+    ` : ""}
     <section class="alch-drawer-section">
-      <h4>pmf · journey</h4>
+      ${sechead("pmf · journey", "where they are on the arc")}
       ${journeyDetailSection(team)}
     </section>
     ${team.paper_basis || team.hackathon_note ? `
       <section class="alch-drawer-section">
-        <h4>credentials</h4>
-        ${team.paper_basis  ? `<div class="alch-drawer-row"><span class="dr-k">paper</span><span class="dr-v">${escHtml(team.paper_basis)}</span></div>`  : ""}
+        ${sechead("credentials", "papers · hackathons")}
+        ${team.paper_basis  ? `<div class="alch-drawer-row"><span class="dr-k">paper</span><span class="dr-v">${escHtml(constText(team.paper_basis))}</span></div>`  : ""}
         ${team.hackathon_note ? `<div class="alch-drawer-row"><span class="dr-k">hackathon</span><span class="dr-v"><span style="color:var(--alchemy-oxide-bright)">★</span> ${escHtml(team.hackathon_note)}</span></div>` : ""}
       </section>
     ` : ""}
     <section class="alch-drawer-section">
-      <h4>links</h4>
+      ${sechead("links", "")}
       ${linksRow}
     </section>
     ${memberClusters.length ? `
       <section class="alch-drawer-section">
-        <h4>synergy clusters</h4>
-        <div class="alch-drawer-clusters">
+        ${sechead("clusters", "why they sit in these wells")}
+        <div class="alch-drawer-clusters alch-drawer-cluster-cards">
           ${memberClusters.map(cl => `
-            <span class="alch-drawer-cluster" data-cluster="${escHtml(cl.record_id)}">${escHtml(cl.label)}</span>
+            <span class="alch-drawer-cluster"><span>${escHtml(cl.label || cl.name || cl.record_id)}</span>${cl.description ? `<em>${escHtml(cl.description)}</em>` : ""}</span>
           `).join("")}
         </div>
       </section>
@@ -5510,6 +10131,7 @@ function openDrawer(recordId) {
 }
 
 function closeDrawer() {
+  state.constellationDrawerRecordId = null;
   const backdrop = document.querySelector(".alch-drawer-backdrop");
   const drawer = document.querySelector(".alch-drawer");
   if (backdrop) backdrop.classList.remove("is-open");
@@ -5640,7 +10262,7 @@ async function refreshFeed({ source = "auto", force = false } = {}) {
   const userHandles = [];
   const seenHandles = new Set();
   for (const p of state.cohort?.people || []) {
-    const gh = String(p?.links?.github || "").trim();
+    const gh = normalizeGithubAccount(p?.links?.github || p?.github || p?.gh_handle);
     if (!gh) continue;
     const lower = gh.toLowerCase();
     if (seenHandles.has(lower)) continue;
@@ -6371,7 +10993,9 @@ function renderProfile() {
           title="switch to ${themeNext} mode"
           aria-label="switch to ${themeNext} mode"
         >
-          <span class="alch-theme-toggle-icon" aria-hidden="true">${themeNow === "light" ? "☾" : "☀"}</span>
+          <span class="alch-theme-toggle-icon" aria-hidden="true">${themeNow === "light"
+            ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401"/></svg>`
+            : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 3v1"/><path d="M12 20v1"/><path d="M3 12h1"/><path d="M20 12h1"/><path d="m18.364 5.636-.707.707"/><path d="m6.343 17.657-.707.707"/><path d="m5.636 5.636.707.707"/><path d="m17.657 17.657.707.707"/></svg>`}</span>
           <span class="alch-theme-toggle-label">${themeNext} mode</span>
         </button>
       </div>
@@ -6551,7 +11175,8 @@ function renderSubmitBlock(p) {
 }
 
 function profileSlug(profile) {
-  const src = (profile?.user?.github || profile?.user?.name || "").toString();
+  const account = normalizeGithubAccount(profile?.user?.github);
+  const src = (account || profile?.user?.name || "").toString();
   return src.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 }
 // Slug for an in-flight ADD form. Prefers values from the form itself
@@ -6561,8 +11186,9 @@ function profileSlug(profile) {
 function draftSlug(p) {
   const d = p?.editDraft || {};
   const isPerson = p?.editKind === "person";
+  const account = isPerson ? normalizeGithubAccount(d?.links?.github || p?.user?.github) : null;
   const src = isPerson
-    ? (d?.links?.github || d?.name || p?.user?.github || p?.user?.name || "")
+    ? (account || d?.name || p?.user?.name || "")
     : (d?.name || "");
   return String(src).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 }
@@ -6585,8 +11211,7 @@ function wireProfileForm() {
   const themeBtn = state.canvas.querySelector("#alch-theme-toggle");
   if (themeBtn) {
     themeBtn.addEventListener("click", () => {
-      const next = toggleTheme();
-      toast(`switched to ${next} mode`);
+      toggleTheme();
       renderProfile();
       wireProfileForm();
     });
@@ -6792,8 +11417,9 @@ ${bodyContent}`;
 // that the form mutates in place.
 function buildPersonMarkdown(draft, slug, body = null) {
   const links = draft.links || {};
+  const githubAccount = normalizeGithubAccount(links.github);
   const lp = [];
-  if (links.github)   lp.push(`  github: ${quoteYaml(links.github)}`);
+  if (githubAccount || links.github) lp.push(`  github: ${quoteYaml(githubAccount || links.github)}`);
   if (links.x)        lp.push(`  x: ${quoteYaml(links.x)}`);
   if (links.website)  lp.push(`  website: ${quoteYaml(links.website)}`);
   if (links.linkedin) lp.push(`  linkedin: ${quoteYaml(links.linkedin)}`);
