@@ -9561,6 +9561,57 @@ function announceExport(r) {
 // hero (shape glyph + name + kind), about, credentials, links, members,
 // synergy clusters. Entered by clicking a card; back button returns to
 // the previous mode (typically shapes).
+// ─── #203 cohort-intel detail helpers — dropped during mega-merge (-X ours); restored ───
+function detailItems(value) {
+  if (Array.isArray(value)) return value.map(v => String(v || "").trim()).filter(Boolean);
+  if (typeof value === "string" && value.trim()) return [value.trim()];
+  return [];
+}
+
+function detailList(items, opts = {}) {
+  const vals = detailItems(items);
+  if (!vals.length) return "";
+  const cls = opts.compact ? " alch-detail-list-compact" : "";
+  return `<ul class="alch-detail-list${cls}">${vals.map(v => `<li>${escHtml(v)}</li>`).join("")}</ul>`;
+}
+
+function detailChips(items, opts = {}) {
+  const vals = detailItems(items);
+  if (!vals.length) return "";
+  const cls = opts.muted ? " alch-detail-chips-muted" : "";
+  return `<div class="alch-detail-chips${cls}">${vals.map(v => `<span class="alch-detail-chip">${escHtml(v)}</span>`).join("")}</div>`;
+}
+
+function detailRows(rows) {
+  return rows
+    .filter(r => r && r.value)
+    .map(r => `<div class="alch-detail-row"><span class="adr-k">${escHtml(r.key)}</span><span class="adr-v">${r.value}</span></div>`)
+    .join("");
+}
+
+function renderDetailSection(title, rows, aux = "") {
+  const body = detailRows(rows);
+  if (!body) return "";
+  return `
+    <section class="alch-detail-section">
+      <h3 class="alch-detail-h">${escHtml(title)}${aux ? ` <span class="alch-profile-h-aux">${escHtml(aux)}</span>` : ""}</h3>
+      ${body}
+    </section>
+  `;
+}
+
+function renderDependencyLinks(ids) {
+  const vals = detailItems(ids);
+  if (!vals.length) return "";
+  const teamsById = new Map((state.cohort?.teams || []).map(t => [t.record_id, t]));
+  return `<ul class="alch-detail-list alch-detail-list-compact">${vals.map(id => {
+    const t = teamsById.get(id);
+    const label = t ? (t.name || t.record_id) : id;
+    const role = t ? teamKind(t) : "record";
+    return `<li><button type="button" class="alch-detail-inline-link" data-person="${escAttr(id)}">${escHtml(label)}</button> <span class="adl-role">${escHtml(role)}</span></li>`;
+  }).join("")}</ul>`;
+}
+
 function renderDetail(recordId) {
   const cohortIndex = buildCohortIndex(activeDetailCohort());
   const team = cohortIndex.teamById.get(recordId);
