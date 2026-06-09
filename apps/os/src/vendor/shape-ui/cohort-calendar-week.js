@@ -277,33 +277,53 @@ export function exportWeekPng({ data, weekIdx = 0 } = {}) {
     if (line) lines.push(line);
     return lines;
   };
-  const firstLine = (block) => {
-    const raw = (block.split("\n")[0] || "").trim();
-    const { time, rest } = splitLeadingTime(raw);
-    return { time: time || "", title: (rest || (time ? "" : raw)) };
+  // Parse a block into its time, title, and detail lines (bullets / extra
+  // lines) so the card shows the full event, not just the first line.
+  const parseBlock = (block) => {
+    const lines = block.split("\n").map(l => l.replace(/\s+$/, "")).filter(l => l.trim());
+    const first = (lines[0] || "").trim();
+    const { time, rest } = splitLeadingTime(first);
+    const title = (rest || (time ? "" : first)).trim();
+    const details = lines.slice(1).map(l => l.replace(/^\s*[-•]\s*/, "").trim()).filter(Boolean);
+    return { time: time || "", title, details };
+  };
+  const hexA = (hex, a) => {
+    const n = parseInt(String(hex).slice(1), 16);
+    return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
   };
 
+  // ── type scale ───────────────────────────────────────────────────────
+  const CHIP_FONT  = `700 13px "JetBrains Mono", ui-monospace, monospace`;
+  const TIME_FONT  = `600 16px "JetBrains Mono", ui-monospace, monospace`;
+  const TITLE_FONT = `600 22px "JetBrains Mono", ui-monospace, monospace`;
+  const DET_FONT   = `400 16px "JetBrains Mono", ui-monospace, monospace`;
+  const TITLE_LH = 30, DET_LH = 24, PADX = 22;
+
   // ── measure pass: compute total height ───────────────────────────────
-  const TITLE_FONT = `600 27px "JetBrains Mono", ui-monospace, monospace`;
-  const TIME_FONT  = `600 18px "JetBrains Mono", ui-monospace, monospace`;
-  const CAT_FONT   = `700 15px "JetBrains Mono", ui-monospace, monospace`;
-  let H = 0;
-  H += 196;                            // header
+  let H = 216;                         // header
   const layout = [];
   for (const d of days) {
     layout.push({ kind: "dayhead", d });
-    H += 64;
+    H += 56;
     for (const block of d.blocks) {
-      const { time, title } = firstLine(block);
+      const ev = parseBlock(block);
       const cat = eventCategory(block);
-      const titleLines = wrap(title || time, TITLE_FONT, COL - 52);
-      const cardH = 22 /*chip*/ + (time ? 26 : 4) + titleLines.length * 34 + 26;
-      layout.push({ kind: "event", time, title, titleLines, cat, cardH });
-      H += cardH + 12;
+      const titleLines = ev.title ? wrap(ev.title, TITLE_FONT, COL - PADX * 2) : [];
+      const detailLines = [];
+      for (const det of ev.details)
+        for (const ln of wrap(det, DET_FONT, COL - PADX * 2 - 14)) detailLines.push(ln);
+      let ch = 14;                                       // top pad
+      if (cat.label || cat.tbc) ch += 24;                // chip
+      if (ev.time) ch += 22;                             // time line
+      ch += titleLines.length * TITLE_LH;
+      if (detailLines.length) ch += 8 + detailLines.length * DET_LH;
+      ch += 14;                                          // bottom pad
+      layout.push({ kind: "event", time: ev.time, titleLines, detailLines, cat, ch });
+      H += ch + 10;
     }
-    H += 12;
+    H += 14;
   }
-  H += 96;                             // footer
+  H += 92;                             // footer
 
   const cnv = document.createElement("canvas");
   cnv.width = W * S; cnv.height = H * S;
@@ -329,46 +349,54 @@ export function exportWeekPng({ data, weekIdx = 0 } = {}) {
   y += 60;
 
   // ── days + events ────────────────────────────────────────────────────
+  ctx.textBaseline = "top";
   for (const item of layout) {
     if (item.kind === "dayhead") {
-      ctx.fillStyle = "#43332e"; ctx.fillRect(PAD, y + 6, COL, 1);
-      ctx.fillStyle = "#f3b174"; ctx.font = `700 17px "JetBrains Mono", ui-monospace, monospace`;
-      ctx.fillText((DAY_NAMES_FULL[item.d.name] || item.d.name).toUpperCase(), PAD, y + 36);
-      ctx.fillStyle = "#8f817a"; ctx.textAlign = "right";
-      ctx.fillText(String(item.d.date).toUpperCase(), W - PAD, y + 36);
+      ctx.fillStyle = "#3a2c26"; ctx.fillRect(PAD, y + 2, COL, 1);
       ctx.textAlign = "left";
-      y += 64;
+      ctx.fillStyle = "#f3b174"; ctx.font = `700 16px "JetBrains Mono", ui-monospace, monospace`;
+      ctx.fillText((DAY_NAMES_FULL[item.d.name] || item.d.name).toUpperCase(), PAD, y + 22);
+      ctx.textAlign = "right";
+      ctx.fillStyle = "#8f817a"; ctx.font = `400 15px "JetBrains Mono", ui-monospace, monospace`;
+      ctx.fillText(String(item.d.date).toUpperCase(), W - PAD, y + 23);
+      ctx.textAlign = "left";
+      y += 56;
       continue;
     }
     const hex = CAL_CAT_HEX[item.cat.key] || CAL_CAT_HEX.default;
-    const x = PAD, cw = COL, ch = item.cardH;
-    // card
-    ctx.fillStyle = "rgba(255,255,255,0.04)";
-    roundRect(ctx, x, y, cw, ch, 14); ctx.fill();
-    ctx.fillStyle = hex; roundRect(ctx, x, y, 6, ch, 3); ctx.fill();
-    let ty = y + 26;
-    const tx = x + 22;
-    // category chip
-    const chipText = (item.cat.label || (item.cat.tbc ? "" : "")).toUpperCase();
-    if (chipText || item.cat.tbc) {
-      ctx.font = CAT_FONT; ctx.fillStyle = hex;
-      ctx.fillText(chipText, tx, ty);
+    const ch = item.ch;
+    // card — subtle category tint + full-height color rail
+    ctx.fillStyle = item.cat.key === "default" ? "rgba(255,255,255,0.035)" : hexA(hex, 0.07);
+    roundRect(ctx, PAD, y, COL, ch, 13); ctx.fill();
+    ctx.fillStyle = hex; roundRect(ctx, PAD, y, 5, ch, 2.5); ctx.fill();
+    const tx = PAD + PADX;
+    let ty = y + 14;
+    if (item.cat.label || item.cat.tbc) {
+      const chipText = (item.cat.label || "").toUpperCase();
+      ctx.font = CHIP_FONT; ctx.fillStyle = hex;
+      if (chipText) ctx.fillText(chipText, tx, ty);
       if (item.cat.tbc) {
-        const cw2 = chipText ? ctx.measureText(chipText).width + 14 : 0;
-        ctx.fillStyle = "#e3c77f"; roundRect(ctx, tx + cw2, ty - 13, 42, 18, 9); ctx.fill();
-        ctx.fillStyle = "#161311"; ctx.font = `700 12px "JetBrains Mono", ui-monospace, monospace`;
-        ctx.fillText("TBC", tx + cw2 + 8, ty + 1);
+        const off = chipText ? ctx.measureText(chipText).width + 12 : 0;
+        ctx.fillStyle = "#e3c77f"; roundRect(ctx, tx + off, ty - 2, 40, 17, 8); ctx.fill();
+        ctx.fillStyle = "#161311"; ctx.font = `700 11px "JetBrains Mono", ui-monospace, monospace`;
+        ctx.fillText("TBC", tx + off + 9, ty + 1);
       }
-      ty += 28;
+      ty += 24;
     }
     if (item.time) {
-      ctx.font = TIME_FONT; ctx.fillStyle = "#f0e7df";
-      ctx.fillText(item.time, tx, ty); ty += 26;
+      ctx.font = TIME_FONT; ctx.fillStyle = "#e9dccb";
+      ctx.fillText(item.time, tx, ty); ty += 22;
     }
-    ctx.font = TITLE_FONT; ctx.fillStyle = "#f0e7df";
-    for (const ln of item.titleLines) { ctx.fillText(ln, tx, ty); ty += 34; }
-    y += ch + 12;
+    ctx.font = TITLE_FONT; ctx.fillStyle = "#f4ede3";
+    for (const ln of item.titleLines) { ctx.fillText(ln, tx, ty); ty += TITLE_LH; }
+    if (item.detailLines.length) {
+      ty += 8;
+      ctx.font = DET_FONT; ctx.fillStyle = "#b3a59b";
+      for (const ln of item.detailLines) { ctx.fillText(ln, tx + 14, ty); ty += DET_LH; }
+    }
+    y += ch + 10;
   }
+  ctx.textBaseline = "alphabetic";
 
   // ── footer ───────────────────────────────────────────────────────────
   y += 24;
