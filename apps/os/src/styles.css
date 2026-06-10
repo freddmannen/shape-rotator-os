@@ -20183,8 +20183,12 @@ button.alch-quick-link {
   color: var(--alchemy-ink-mute);
 }
 /* Onboarding content is left-aligned under the intro strip; keep its
- * closing callout on the same edge instead of the shared centered one. */
+ * closing callout on the same edge instead of the shared centered one.
+ * Same for the profile page (.alch-seal-section marks it) — its form
+ * sections are a left-aligned 60ch column, so a centered callout reads
+ * as floating in dead space. */
 .alchemy-canvas:has(.alch-onb-steps) .alch-callout { margin-left: 0; margin-right: 0; }
+.alchemy-canvas:has(.alch-seal-section) .alch-callout { margin-left: 0; margin-right: 0; max-width: 60ch; }
 /* An intro strip with no text yet keeps its reserved space (same height +
  * spacing as every other page) but hides the rectangle. Adding text to the
  * div makes the outline appear automatically. */
