@@ -263,7 +263,89 @@ async function renderResealCard(host, { variant, cohortHint, close, repaint }) {
     return `<option value="${escAttr(r.record_id)}" ${isCurrent ? "selected" : ""}>${escHtml(r.name || r.record_id)}${kind === "person" && r.team ? ` · ${escHtml(r.team)}` : ""}</option>`;
   }).join("");
 
-  host.innerHTML = `
+  // Record pickers — shared between both variants; only the row class
+  // differs (modal keeps the ember .im-row grid, inline rides the same
+  // .alch-pf-row grid the editor above it uses).
+  const selectRows = (rowCls) => `
+    <label class="${rowCls}"><span>person</span>
+      <select data-im-pick="person">
+        <option value="">— you —</option>
+        ${optHtml(pools.person, "person")}
+      </select>
+    </label>
+    <label class="${rowCls}"><span>team</span>
+      <select data-im-pick="team">
+        <option value="">— your team —</option>
+        ${optHtml(pools.team, "team")}
+      </select>
+    </label>
+    <label class="${rowCls}"><span>project</span>
+      <select data-im-pick="project">
+        <option value="">— your project —</option>
+        ${optHtml(pools.project, "project")}
+      </select>
+    </label>
+  `;
+
+  if (inline) {
+    // Editorial variant — reads as one more section of the profile page
+    // (same heading treatment, row grid, and pill buttons as the editor
+    // above it), not as the ember enrollment terminal.
+    const label = currentResolved?.label || currentId?.display_name || "";
+    const initials = labelInitials(label);
+    host.innerHTML = `
+      <h3 class="alch-profile-h">your seal</h3>
+      ${claimed ? `
+        <div class="alch-seal-current">
+          <span class="alch-seal-avatar" aria-hidden="true">${currentResolved?.avatar
+            ? `<img class="alch-seal-avatar-img" alt="" />`
+            : `<span class="alch-seal-initials">${escHtml(initials)}</span>`}</span>
+          <div class="alch-seal-who">
+            <span class="alch-seal-name">${escHtml(label)}</span>
+            <span class="alch-seal-meta">${escHtml(currentId.kind)} · ${escHtml(currentId.record_id)}${currentResolved?.gh ? ` · @${escHtml(currentResolved.gh)}` : ""}</span>
+          </div>
+          <div class="alch-seal-actions">
+            <button class="alch-seal-btn" type="button" data-im-action="edit">edit my record</button>
+            <button class="alch-seal-btn alch-seal-btn-quiet" type="button" data-im-action="unclaim">break the seal</button>
+          </div>
+        </div>
+      ` : `
+        <p class="alch-seal-empty">no seal yet — pick your record below to tell shape rotator who you are. stored on this device, never broadcast.</p>
+      `}
+
+      <div class="alch-seal-group">
+        <p class="alch-seal-lede">${claimed ? "re-seal as another shape" : "find your shape"}</p>
+        ${selectRows("alch-pf-row")}
+      </div>
+
+      <div class="alch-seal-group">
+        <p class="alch-seal-lede">not on the rolls yet</p>
+        <div class="alch-seal-btnrow">
+          <button class="alch-seal-btn" data-create="person"  type="button">+ new person</button>
+          <button class="alch-seal-btn" data-create="team"    type="button">+ new team</button>
+          <button class="alch-seal-btn" data-create="project" type="button">+ new project</button>
+          <button class="alch-seal-btn alch-seal-btn-quiet alch-seal-resync" data-im-resync type="button"
+                  title="re-pull cohort-data/*.md from github. background pulls run hourly; click to refresh now.">
+            <span class="im-resync-label">re-sync the rolls</span>
+          </button>
+        </div>
+        <p class="alch-pf-pick">opens the editor above with a blank shape — submit a PR to join.</p>
+      </div>
+    `;
+    // Avatar image: src + error fallback wired here (not in the template)
+    // so a 404/offline github swaps in the initials without inline JS.
+    const avatarImg = host.querySelector(".alch-seal-avatar-img");
+    if (avatarImg && currentResolved?.avatar) {
+      avatarImg.referrerPolicy = "no-referrer";
+      avatarImg.loading = "lazy";
+      avatarImg.src = currentResolved.avatar;
+      avatarImg.addEventListener("error", () => {
+        const wrap = avatarImg.closest(".alch-seal-avatar");
+        if (wrap) wrap.innerHTML = `<span class="alch-seal-initials">${escHtml(initials)}</span>`;
+      }, { once: true });
+    }
+  } else {
+    host.innerHTML = `
     <div class="enroll-scan" aria-hidden="true"></div>
     <div class="enroll-band">
       <span class="enroll-issuer"><svg class="issuer-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg> shape rotator · alchemy</span>
@@ -271,7 +353,7 @@ async function renderResealCard(host, { variant, cohortHint, close, repaint }) {
     </div>
 
     <header class="im-head">
-      <h2 ${inline ? "" : 'id="im-title"'} class="im-title">
+      <h2 id="im-title" class="im-title">
         ${claimed ? "re-seal" : "identify yourself"}
       </h2>
       <p class="im-sub">
@@ -281,7 +363,7 @@ async function renderResealCard(host, { variant, cohortHint, close, repaint }) {
       </p>
       ${claimed ? `
         <div class="im-current-actions">
-          <button class="im-btn im-current-edit"    type="button" data-im-action="edit">edit my record ${inline ? "↑" : "→"}</button>
+          <button class="im-btn im-current-edit"    type="button" data-im-action="edit">edit my record →</button>
           <button class="im-btn im-current-unclaim" type="button" data-im-action="unclaim">break the seal</button>
         </div>
       ` : ""}
@@ -289,24 +371,7 @@ async function renderResealCard(host, { variant, cohortHint, close, repaint }) {
 
     <section class="im-section">
       <h3 class="im-h"><span class="im-h-no">01</span> ${claimed ? "re-seal as another shape" : "find your shape"}</h3>
-      <label class="im-row"><span>person</span>
-        <select data-im-pick="person">
-          <option value="">— you —</option>
-          ${optHtml(pools.person, "person")}
-        </select>
-      </label>
-      <label class="im-row"><span>team</span>
-        <select data-im-pick="team">
-          <option value="">— your team —</option>
-          ${optHtml(pools.team, "team")}
-        </select>
-      </label>
-      <label class="im-row"><span>project</span>
-        <select data-im-pick="project">
-          <option value="">— your project —</option>
-          ${optHtml(pools.project, "project")}
-        </select>
-      </label>
+      ${selectRows("im-row")}
     </section>
 
     <section class="im-section">
@@ -324,9 +389,10 @@ async function renderResealCard(host, { variant, cohortHint, close, repaint }) {
               title="re-pull cohort-data/*.md from github. background pulls run hourly; click to refresh now.">
         <span class="im-resync-label">re-sync the rolls</span>
       </button>
-      ${inline ? "" : `<button class="im-skip" data-im-skip type="button">${claimed ? "close" : "not yet →"}</button>`}
+      <button class="im-skip" data-im-skip type="button">${claimed ? "close" : "not yet →"}</button>
     </footer>
   `;
+  }
 
   // Re-populate the person/team/project dropdowns when the cohort
   // surface refreshes. On a cold first-launch the LS cache or fixture
@@ -428,7 +494,7 @@ async function renderResealCard(host, { variant, cohortHint, close, repaint }) {
   wirePick("project");
 
   // Create paths: route to alchemy/profile/add — they can claim after PR merges.
-  for (const btn of host.querySelectorAll(".im-create[data-create]")) {
+  for (const btn of host.querySelectorAll("[data-create]")) {
     btn.addEventListener("click", () => {
       goEditor({ kind: btn.dataset.create, mode: "add" });
     });
@@ -476,7 +542,7 @@ async function renderResealCard(host, { variant, cohortHint, close, repaint }) {
 export async function mountResealInline(host) {
   if (!host) return;
   try { if (typeof host.__resealCleanup === "function") host.__resealCleanup(); } catch {}
-  host.classList.add("identity-inline", "enroll");
+  host.classList.add("alch-profile-section", "alch-seal-section");
   host.__resealCleanup = await renderResealCard(host, {
     variant: "inline",
     repaint: () => { if (host.isConnected) mountResealInline(host); },

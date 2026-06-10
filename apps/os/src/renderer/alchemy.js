@@ -13159,15 +13159,16 @@ function renderProfile() {
       <div id="alch-submit-pr-result" class="alch-submit-pr-result" hidden></div>
     </section>
 
+    <!-- your seal — identity claim / switch / unclaim / resync (merged
+         from the identity-pill popup 2026-06); filled by mountResealInline
+         as another .alch-profile-section so the page reads as one form. -->
+    <section id="alch-reseal-host" aria-label="your seal"></section>
+
     <p class="alch-callout"><strong>profile · v0.2</strong><br/>
     Submitting opens a PR against this repo. Stewards review + merge → cohort sees the change on next
     <code>npm run build:cohort</code>. Updates only touch surface fields (steward-managed fields like class /
     archetype / status are preserved by manual edit in the github editor). The feed auto-tracks every
     team or project's <code>links.repo</code> — fill it in via <strong>edit → team</strong> or <strong>edit → project</strong> to surface activity.</p>
-
-    <!-- re-seal card (claim / switch / unclaim / resync) — merged here
-         from the identity-pill popup 2026-06; filled by mountResealInline. -->
-    <section id="alch-reseal-host" aria-label="your seal"></section>
   `;
 }
 
