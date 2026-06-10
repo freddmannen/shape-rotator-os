@@ -13059,19 +13059,38 @@ body[data-sidebar="hidden"] .fg-footer-row { display: none; }
 }
 
 /* ── profile editor (forms) ──────────────────────────────────────── */
-.alch-pf-modetab, .alch-pf-subtab {
-  background: transparent;
-  color: var(--ed-ink-3);
+/* Mode (add/edit) + kind (team/project/person) render as segmented
+ * controls — one hairline group each, dividers between options, filled
+ * segment for the active choice — side by side on one row. */
+.alch-pf-tabsrow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.alch-pf-modetabs, .alch-pf-subtabs {
+  display: inline-flex;
+  width: max-content;
   border: 1px solid var(--ed-rule-2);
-  font-family: var(--ed-mono);
-  letter-spacing: 0.22em;
+  border-radius: 999px;
+  overflow: hidden;
 }
-.alch-pf-modetab:hover, .alch-pf-subtab:hover { color: var(--ed-ink-1); border-color: var(--ed-ink-1); }
+.alch-pf-modetab, .alch-pf-subtab {
+  appearance: none;
+  background: transparent;
+  color: var(--ed-ink-4);
+  border: 0;
+  margin: 0;
+  padding: 7px 16px;
+  font-family: var(--ed-mono);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: lowercase;
+  cursor: pointer;
+  transition: color 160ms ease, background 160ms ease;
+}
+.alch-pf-modetab + .alch-pf-modetab,
+.alch-pf-subtab + .alch-pf-subtab { border-left: 1px solid var(--ed-rule-2); }
+.alch-pf-modetab:hover, .alch-pf-subtab:hover { color: var(--ed-ink-1); }
 .alch-pf-modetab[aria-selected="true"],
 .alch-pf-subtab[aria-selected="true"] {
-  color: var(--ed-ink-1);
-  border-color: var(--ed-ink-1);
-  background: transparent;
+  background: var(--ed-ink-1);
+  color: var(--ed-bg-0);
 }
 .alch-pf-row > span, .alch-pf-target label > span { color: var(--ed-ink-4); letter-spacing: 0.22em; }
 .alch-pf-row input, .alch-pf-row select, .alch-pf-target-select {
@@ -13527,7 +13546,10 @@ html, body { background: var(--ed-bg-0); }
   background: var(--ed-bg-well);
   border-radius: 0;
 }
-.im-btn, .alch-pf-modetab, .alch-pf-subtab {
+/* (.alch-pf-modetab/.alch-pf-subtab left this list 2026-06 — they're
+ * square segments inside a rounded group now; a per-button pill radius
+ * would round the selected fill inside the track.) */
+.im-btn {
   border-radius: 999px;
   text-transform: lowercase;
   letter-spacing: 0.16em;

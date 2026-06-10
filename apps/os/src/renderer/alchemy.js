@@ -13163,15 +13163,17 @@ function renderProfile() {
 
     <section class="alch-profile-section">
       <h3 class="alch-profile-h">${p.editMode === "add" ? "add a record" : "edit a record"}</h3>
-      <nav class="alch-pf-modetabs" role="tablist" aria-label="add or edit">
-        <button class="alch-pf-modetab" data-edit-mode="add"  type="button" aria-selected="${p.editMode === "add"}">add</button>
-        <button class="alch-pf-modetab" data-edit-mode="edit" type="button" aria-selected="${p.editMode === "edit"}">edit</button>
-      </nav>
-      <nav class="alch-pf-subtabs" role="tablist" aria-label="record kind">
-        <button class="alch-pf-subtab" data-edit-kind="team"    type="button" aria-selected="${p.editKind === "team"}">team</button>
-        <button class="alch-pf-subtab" data-edit-kind="project" type="button" aria-selected="${p.editKind === "project"}">project</button>
-        <button class="alch-pf-subtab" data-edit-kind="person"  type="button" aria-selected="${p.editKind === "person"}">person</button>
-      </nav>
+      <div class="alch-pf-tabsrow">
+        <nav class="alch-pf-modetabs" role="tablist" aria-label="add or edit">
+          <button class="alch-pf-modetab" data-edit-mode="add"  type="button" aria-selected="${p.editMode === "add"}">add</button>
+          <button class="alch-pf-modetab" data-edit-mode="edit" type="button" aria-selected="${p.editMode === "edit"}">edit</button>
+        </nav>
+        <nav class="alch-pf-subtabs" role="tablist" aria-label="record kind">
+          <button class="alch-pf-subtab" data-edit-kind="team"    type="button" aria-selected="${p.editKind === "team"}">team</button>
+          <button class="alch-pf-subtab" data-edit-kind="project" type="button" aria-selected="${p.editKind === "project"}">project</button>
+          <button class="alch-pf-subtab" data-edit-kind="person"  type="button" aria-selected="${p.editKind === "person"}">person</button>
+        </nav>
+      </div>
       <div class="alch-pf-editor" id="alch-pf-editor">${editorBody}</div>
       <div id="alch-submit-pr-result" class="alch-submit-pr-result" hidden></div>
     </section>
