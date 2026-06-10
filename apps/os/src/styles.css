@@ -13154,6 +13154,54 @@ body[data-sidebar="hidden"] .fg-footer-row { display: none; }
   color: var(--ed-ink-3);
 }
 
+/* ── profile · submit row (save · local sync / save · open github PR) ──
+ * These buttons had no rules at all and rendered as raw UA buttons.
+ * Editorial pills like the rest of the page: the local-sync path is the
+ * primary CTA (filled ink), github PR the outlined secondary, and a
+ * disabled path recedes instead of shouting. */
+.alch-profile-submit-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.alch-submit-pr-btn {
+  appearance: none;
+  display: inline-flex; align-items: center; gap: 8px;
+  background: transparent;
+  color: var(--ed-ink-2);
+  border: 1px solid var(--ed-rule-2);
+  border-radius: 999px;
+  padding: 8px 16px;
+  font-family: var(--ed-mono); font-size: 10.5px;
+  letter-spacing: 0.16em; text-transform: lowercase;
+  cursor: pointer;
+  transition: color 160ms ease, border-color 160ms ease, opacity 160ms ease;
+}
+.alch-submit-pr-btn:hover { color: var(--ed-ink-1); border-color: var(--ed-ink-1); }
+.alch-submit-pr-primary {
+  background: var(--ed-ink-1);
+  color: var(--ed-bg-0);
+  border-color: var(--ed-ink-1);
+}
+.alch-submit-pr-primary:hover { color: var(--ed-bg-0); border-color: var(--ed-ink-1); opacity: 0.88; }
+.alch-submit-pr-btn[disabled] {
+  background: transparent;
+  color: var(--ed-ink-4);
+  border-color: var(--ed-rule-2);
+  cursor: not-allowed;
+  opacity: 0.75;
+}
+.alch-submit-pr-mute { font-size: 9.5px; letter-spacing: 0.08em; opacity: 0.8; }
+.alch-submit-pr-hint {
+  margin: 12px 0 0;
+  max-width: 60ch;
+  font-family: var(--ed-mono);
+  font-size: 11px; line-height: 1.65;
+  color: var(--ed-ink-4);
+}
+.alch-submit-pr-hint code { color: var(--ed-ink-3); }
+.alch-submit-pr-hint strong { color: var(--ed-ink-3); font-weight: 500; }
+
+/* Theme toggle inside the intro strip — keep it on the right edge
+ * without shrinking. */
+.alch-page-intro .alch-theme-toggle { flex: 0 0 auto; }
+
 /* ── network + metrics ───────────────────────────────────────────── */
 #network-view, #metrics-view { background: var(--ed-bg-0); color: var(--ed-ink-2); }
 .net-subtab {
