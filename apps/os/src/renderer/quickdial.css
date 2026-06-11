@@ -921,6 +921,17 @@
   78%  { transform: rotateY(8deg) scale(1.06); }
   100% { opacity: 1; transform: rotateY(0deg) scale(1); }
 }
+/* THE FACET FLIP — branch↔leaf depth changes within one solid family.
+ * The face (already wearing the new gem) sweeps in from edge-on: the
+ * same object turning one facet, lighter than the full cube turn. */
+#quick-dial .qd-fab-shape.facet .qd-fab-face {
+  animation: qd-facet 320ms var(--qd-expo) both;
+}
+@keyframes qd-facet {
+  0%   { opacity: 1; transform: rotateY(-86deg) scale(0.92); }
+  72%  { transform: rotateY(7deg) scale(1.05); }
+  100% { opacity: 1; transform: rotateY(0deg) scale(1); }
+}
 /* alive on hover — a gentle tilt, still a cube */
 #quick-dial[data-state="rest"] .qd-fab:hover .qd-fab-shape {
   transform: rotate(-12deg) scale(1.08);

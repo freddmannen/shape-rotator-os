@@ -124,48 +124,34 @@ function orbVars(node) {
   const branch = branchOf(node);
   const orb = BRANCH_ORBS[branch];
   if (!orb) return "";
-  const shape = BRANCH_SHAPES[branch] || "circle(48% at 50% 50%)";
+  // a leaf wears its own gem everywhere it appears — bubble, path
+  // marker, FAB facet — so the chosen shape survives the whole journey
+  const shape = node.variant?.shape || BRANCH_SHAPES[branch] || "circle(48% at 50% 50%)";
   return `--qd-orb-base:${orb.base};--qd-orb-rim:${orb.rim};--qd-orb-contour:${orb.contour};--qd-shape:${shape}`;
 }
 
-// Ring-2 is a SHAPE FAMILY, not six copies: every option is a variation
-// of its branch's solid. Ask's octahedron becomes six gem cuts; seek's
-// sphere becomes six moons (same silhouette, different light); offer's
-// hexagon becomes six prism facets. Identity through geometry — color
-// does ambience, shape does meaning.
-const SHAPE_FAMILIES = {
-  ask: [
-    { shape: "polygon(50% 2%, 98% 50%, 50% 98%, 2% 50%)", size: 48 },
-    { shape: "polygon(50% 0%, 86% 56%, 50% 100%, 14% 56%)", size: 50 },
-    { shape: "polygon(50% 16%, 100% 50%, 50% 84%, 0% 50%)", size: 50 },
-    { shape: "polygon(32% 4%, 68% 4%, 96% 50%, 68% 96%, 32% 96%, 4% 50%)", size: 46 },
-    { shape: "polygon(30% 2%, 70% 2%, 98% 30%, 98% 70%, 70% 98%, 30% 98%, 2% 70%, 2% 30%)", size: 46 },
-    { shape: "polygon(50% 0%, 82% 36%, 66% 100%, 34% 100%, 18% 36%)", size: 48 },
-  ],
-  seek: [
-    { shape: "circle(48% at 50% 50%)", grad: "32% 28%", size: 48 },
-    { shape: "circle(44% at 50% 50%)", grad: "68% 26%", size: 46 },
-    { shape: "circle(48% at 50% 50%)", grad: "50% 18%", size: 52 },
-    { shape: "circle(40% at 50% 50%)", grad: "26% 50%", size: 42 },
-    { shape: "circle(46% at 50% 50%)", grad: "62% 66%", size: 48 },
-    { shape: "circle(48% at 50% 50%)", grad: "40% 36%", size: 44 },
-  ],
-  offer: [
-    { shape: "polygon(25% 6.7%, 75% 6.7%, 100% 50%, 75% 93.3%, 25% 93.3%, 0% 50%)", size: 48 },
-    { shape: "polygon(50% 0%, 93.3% 25%, 93.3% 75%, 50% 100%, 6.7% 75%, 6.7% 25%)", size: 48 },
-    { shape: "polygon(50% 4%, 96% 38%, 78% 96%, 22% 96%, 4% 38%)", size: 46 },
-    { shape: "polygon(20% 10%, 80% 10%, 96% 90%, 4% 90%)", size: 44 },
-    { shape: "polygon(32% 4%, 96% 18%, 68% 96%, 4% 82%)", size: 48 },
-    { shape: "polygon(14% 20%, 86% 8%, 86% 80%, 14% 92%)", size: 46 },
-  ],
-};
-
-function shapeVariantFor(node, index) {
-  if (node.kind === "branch") return null; // ring 1 wears the canonical solid
-  const family = SHAPE_FAMILIES[branchOf(node)];
-  if (!family) return null;
-  return family[index % family.length];
-}
+// Ring-2 is a GEM TRAY, not a family of cuts: each slot in the ring is a
+// categorically different solid — kite, delta, pentagon, star, octagon,
+// plus — shared by index across every branch. (v1 used six subtle cuts
+// of the parent solid; at 48px parametric variations of one polygon read
+// as rendering errors, not siblings.) Hue carries the family, shape
+// carries the option, and the keyboard numeral n always pairs with the
+// same silhouette — the ring becomes muscle memory. Each gem also gets
+// its own light (--qd-grad), so the tray glints instead of repeating.
+const LEAF_SHAPES = [
+  // kite — the tall gem
+  { shape: "polygon(50% 0%, 90% 42%, 50% 100%, 10% 42%)", size: 52, grad: "36% 24%" },
+  // delta — broad base, points up
+  { shape: "polygon(50% 6%, 97% 92%, 3% 92%)", size: 50, grad: "50% 40%" },
+  // pentagon
+  { shape: "polygon(50% 2%, 98% 38%, 80% 98%, 20% 98%, 2% 38%)", size: 48, grad: "62% 26%" },
+  // five-point star — the ring's one spiky moment
+  { shape: "polygon(50% 0%, 63% 32%, 98% 35%, 72% 58%, 81% 94%, 50% 73%, 19% 94%, 28% 58%, 2% 35%, 37% 32%)", size: 56, grad: "50% 22%" },
+  // octagon
+  { shape: "polygon(30% 2%, 70% 2%, 98% 30%, 98% 70%, 70% 98%, 30% 98%, 2% 70%, 2% 30%)", size: 46, grad: "30% 50%" },
+  // plus gem — arms wide enough to seat the 14px icon
+  { shape: "polygon(32% 2%, 68% 2%, 68% 32%, 98% 32%, 98% 68%, 68% 68%, 68% 98%, 32% 98%, 32% 68%, 2% 68%, 2% 32%, 32% 32%)", size: 50, grad: "64% 60%" },
+];
 
 // Suggested tags for ask composing — recognition over recall. One
 // representative tag per vocab bucket, click to toggle.
@@ -194,6 +180,15 @@ const TREE = {
     },
   ],
 };
+
+// Stamp each leaf with its solid at definition time so bubbles, path
+// markers, and the FAB facet all wear the SAME silhouette — object
+// constancy from ring to marker to anchor.
+for (const branch of TREE.children) {
+  (branch.children || []).forEach((child, i) => {
+    child.variant = LEAF_SHAPES[i % LEAF_SHAPES.length];
+  });
+}
 
 const SEEN_LS_KEY = "srwk:quickdial_seen";
 
@@ -396,11 +391,10 @@ export function mountQuickDial() {
         el.style.setProperty("--qd-dy", `${(anchor.y - opt.pos.y).toFixed(1)}px`);
         const orb = orbVars(opt.node);
         if (orb) el.style.cssText += `;${orb}`;
-        // ring-2 wears its family variant: a different cut of the
-        // branch's solid per sibling (and a different light, for moons)
-        const variant = shapeVariantFor(opt.node, i);
+        // ring-2 wears its own gem (shape arrives via orbVars); size and
+        // light are per-slot so the tray glints instead of repeating
+        const variant = opt.node.variant;
         if (variant) {
-          el.style.setProperty("--qd-shape", variant.shape);
           if (variant.size) el.style.setProperty("--qd-orb-size", `${variant.size}px`);
           if (variant.grad) el.style.setProperty("--qd-grad", variant.grad);
         }
@@ -611,9 +605,14 @@ export function mountQuickDial() {
   // rotating to reveal its next facet, with a ring pulse at the moment
   // of the turn. Back to the cube at rest, with the same turn.
   let lastBaseBranch = null;
+  let lastFacetLeaf = null;
   let turnTimer = 0;
+  let facetTimer = 0;
   function syncBaseShape() {
     const committedBranch = branchOf(ctrl.state.path[1]?.node) || null;
+    // a committed LEAF puts its own gem on the anchor — the journey's
+    // shape rides with you: cube → branch solid → chosen gem
+    const leaf = committedBranch ? ctrl.state.path[2]?.node || null : null;
     let branchId = committedBranch;
     let preview = false;
     if (!branchId && uiState === "drawing") {
@@ -628,16 +627,18 @@ export function mountQuickDial() {
       root.style.setProperty("--qd-orb-base", orb.base);
       root.style.setProperty("--qd-orb-rim", orb.rim);
       root.style.setProperty("--qd-orb-contour", orb.contour);
-      root.style.setProperty("--qd-shape", BRANCH_SHAPES[branchId] || "circle(48% at 50% 50%)");
+      root.style.setProperty("--qd-shape",
+        leaf?.variant?.shape || BRANCH_SHAPES[branchId] || "circle(48% at 50% 50%)");
     } else {
       delete root.dataset.branch;
       delete root.dataset.preview;
     }
+    const shape = root.querySelector(".qd-fab-shape");
     if (committedBranch !== lastBaseBranch) {
       lastBaseBranch = committedBranch;
-      const shape = root.querySelector(".qd-fab-shape");
+      lastFacetLeaf = leaf?.id || null;
       if (shape) {
-        shape.classList.remove("turning");
+        shape.classList.remove("turning", "facet");
         void shape.offsetWidth;
         shape.classList.add("turning");
         // the class must not outlive the turn — a lingering .turning
@@ -649,6 +650,18 @@ export function mountQuickDial() {
         fabRing.classList.remove("on");
         void fabRing.offsetWidth;
         fabRing.classList.add("on");
+      }
+    } else if ((leaf?.id || null) !== lastFacetLeaf) {
+      // same solid, new facet: branch↔leaf movement flips the face in
+      // from edge-on — lighter than the cube turn, no ring pulse. The
+      // full turn above owns branch changes; this owns depth changes.
+      lastFacetLeaf = leaf?.id || null;
+      if (shape && committedBranch) {
+        shape.classList.remove("facet");
+        void shape.offsetWidth;
+        shape.classList.add("facet");
+        clearTimeout(facetTimer);
+        facetTimer = setTimeout(() => shape.classList.remove("facet"), 380);
       }
     }
   }
