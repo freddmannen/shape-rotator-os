@@ -33,14 +33,51 @@ function hashStr(s) {
 
 function teamKind(t) { return (t && t.kind) || "team"; }
 
-// Hover layer: the record's `now` line, revealed over the card head (the
-// sigil + name zone — known information) so it never covers the
-// actionable member/link rows below. Glance = card, hover = what they're
-// doing this week, click = full dossier.
-function nowOverlayHtml(rec) {
+// Markdown → one-line plain text for the about peek. Strips the obvious
+// md syntax and squeezes whitespace; the dossier renders the real thing.
+function mdToPlainText(md, max = 240) {
+  const text = String(md || "")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`([^`]*)`/g, "$1")
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/[*_>~]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (text.length <= max) return text;
+  return `${text.slice(0, max).replace(/\s+\S*$/, "")}…`;
+}
+
+// Hover peeks: quiet "about · now" anchors in the title block, each the
+// deliberate hover target for its own glass layer over the card head.
+// The card body itself triggers nothing, so the cursor can rest on a
+// card while reading. Reveal is CSS-only — see
+// .alch-card:has(.alch-card-peek:hover) in cohort-card.css.
+function cardPeeks(rec) {
+  const about = mdToPlainText(rec?.bio_md);
   const now = String(rec?.now || "").trim();
-  if (!now) return "";
-  return `<div class="alch-card-now"><span>now</span>${escHtml(now)}</div>`;
+  const anchors = [];
+  const layers = [];
+  if (about) {
+    anchors.push(`<span class="alch-card-peek" data-peek="about">about</span>`);
+    layers.push(`<div class="alch-card-peek-layer alch-card-peek-about"><span>about</span>${escHtml(about)}</div>`);
+  }
+  if (now) {
+    anchors.push(`<span class="alch-card-peek" data-peek="now">now</span>`);
+    layers.push(`<div class="alch-card-peek-layer alch-card-now"><span>now</span>${escHtml(now)}</div>`);
+  }
+  return {
+    anchors: anchors.length ? `<div class="alch-card-peeks">${anchors.join("")}</div>` : "",
+    layers: layers.join(""),
+  };
+}
+
+// One "links" row of label anchors (github · x · site · linkedin). The
+// full handles live on the dossier; the card only needs the routes —
+// labels keep every card the same height whether a record has one link
+// or four.
+function linksRowHtml(anchors) {
+  return `<div class="alch-card-meta-row alch-card-links-row"><span class="cm-k">links</span><span class="cm-v">${anchors.join('<span class="acm-sep">·</span>')}</span></div>`;
 }
 
 // Compact skill / topic chips along the card foot — same scanning role
@@ -52,30 +89,6 @@ function cardChipsHtml(values, max = 3) {
     .slice(0, max);
   if (!items.length) return "";
   return `<div class="alch-card-chips">${items.map(v => `<span>${escHtml(v)}</span>`).join("")}</div>`;
-}
-
-function compactGithubLabel(value) {
-  const raw = String(value || "").trim().replace(/^@+/, "");
-  try {
-    const url = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
-    if (/(^|\.)github\.com$/i.test(url.hostname)) {
-      const parts = url.pathname.split("/").filter(Boolean);
-      return parts[0] || raw;
-    }
-  } catch {}
-  return raw.replace(/^(?:www\.)?github\.com\/+/i, "");
-}
-
-function compactXLabel(value) {
-  const raw = String(value || "").trim().replace(/^@+/, "");
-  try {
-    const url = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
-    if (/(^|\.)(?:x|twitter)\.com$/i.test(url.hostname)) {
-      const parts = url.pathname.split("/").filter(Boolean);
-      return parts[0] ? `@${parts[0]}` : raw;
-    }
-  } catch {}
-  return raw ? `@${raw.replace(/^(?:www\.)?(?:x|twitter)\.com\/+/i, "").replace(/^@+/, "")}` : raw;
 }
 
 // ── HTML-string renderers ──────────────────────────────────────────────
@@ -94,16 +107,18 @@ export function teamCardHtml(t, idx, ctx = {}) {
     const label = String(repoRaw).replace(/^https?:\/\//i, "");
     if (href) links.push(`<div class="alch-card-meta-row"><span class="cm-k">repo</span><span class="cm-v"><a href="${escAttr(href)}" data-external class="alch-card-repo-link">${escHtml(label)}</a></span></div>`);
   }
+  // Social links collapse to one labelled row — see linksRowHtml. Only the
+  // repo keeps a dedicated row (it's the feed-tracking signal, not a route).
+  const socials = [];
   if (gh) {
     const href = normalizeLinkHref("github", gh);
-    const label = compactGithubLabel(gh);
-    if (href) links.push(`<div class="alch-card-meta-row"><span class="cm-k">github</span><span class="cm-v"><a href="${escAttr(href)}" data-external>${escHtml(label)}</a></span></div>`);
+    if (href) socials.push(`<a href="${escAttr(href)}" data-external>github</a>`);
   }
   if (x) {
     const href = normalizeLinkHref("x", x);
-    const label = compactXLabel(x);
-    if (href) links.push(`<div class="alch-card-meta-row"><span class="cm-k">x</span><span class="cm-v"><a href="${escAttr(href)}" data-external>${escHtml(label)}</a></span></div>`);
+    if (href) socials.push(`<a href="${escAttr(href)}" data-external>x</a>`);
   }
+  if (socials.length) links.push(linksRowHtml(socials));
   const membership = t.membership || "visiting";
   const cardCls = [
     "alch-card",
@@ -131,6 +146,7 @@ export function teamCardHtml(t, idx, ctx = {}) {
     : (m > 0
       ? `<div class="alch-card-meta-row"><span class="cm-k">${kind === "project" ? "contributors" : "team"}</span><span class="cm-v">${m} ${m === 1 ? "person" : "people"}</span></div>`
       : "");
+  const peeks = cardPeeks(t);
   return `
     <article class="${cardCls}" data-record-id="${escHtml(t.record_id)}" data-display-id="${displayId(idx)}" tabindex="0" role="button" aria-label="${escHtml(t.name)} — open detail">
       <div class="alch-card-head">
@@ -139,6 +155,7 @@ export function teamCardHtml(t, idx, ctx = {}) {
           <div class="alch-card-domain">${escHtml(domainLabel(t.domain))}</div>
           <div class="alch-card-name">${escHtml(t.name)}</div>
           ${t.focus ? `<p class="alch-card-sub">${escHtml(t.focus)}</p>` : ""}
+          ${peeks.anchors}
         </div>
       </div>
       <div class="alch-card-meta">
@@ -147,7 +164,7 @@ export function teamCardHtml(t, idx, ctx = {}) {
         ${links.join("")}
       </div>
       ${cardChipsHtml(t.skill_areas)}
-      ${nowOverlayHtml(t)}
+      ${peeks.layers}
     </article>`;
 }
 
@@ -162,28 +179,30 @@ export function personCardHtml(p, idx, ctx = {}) {
   const teams = Array.isArray(ctx.teams) ? ctx.teams : [];
   const team = p.team ? teams.find(t => t.record_id === p.team) : null;
   const teamLabel = team ? (team.name || team.record_id) : (p.team || "");
-  const links = [];
+  // Social links collapse to one labelled row (github · x · site ·
+  // linkedin) — handle text varied 0–4 rows per person and made the grid
+  // ragged; the labels are the routes, the dossier carries the handles.
+  const socials = [];
   const gh = p?.links?.github;
   const x  = p?.links?.x;
   const w  = p?.links?.website;
   const li = p?.links?.linkedin;
   if (gh) {
     const href = normalizeLinkHref("github", gh);
-    const label = compactGithubLabel(gh);
-    if (href) links.push(`<div class="alch-card-meta-row"><span class="cm-k">github</span><span class="cm-v"><a href="${escAttr(href)}" data-external>${escHtml(label)}</a></span></div>`);
+    if (href) socials.push(`<a href="${escAttr(href)}" data-external>github</a>`);
   }
   if (x) {
     const href = normalizeLinkHref("x", x);
-    const label = compactXLabel(x);
-    if (href) links.push(`<div class="alch-card-meta-row"><span class="cm-k">x</span><span class="cm-v"><a href="${escAttr(href)}" data-external>${escHtml(label)}</a></span></div>`);
+    if (href) socials.push(`<a href="${escAttr(href)}" data-external>x</a>`);
   }
   if (w) {
     const href = normalizeLinkHref("website", w);
-    const label = String(w).replace(/^https?:\/\//i, "");
-    if (href) links.push(`<div class="alch-card-meta-row"><span class="cm-k">site</span><span class="cm-v"><a href="${escAttr(href)}" data-external>${escHtml(label)}</a></span></div>`);
+    if (href) socials.push(`<a href="${escAttr(href)}" data-external>site</a>`);
   }
-  if (li) links.push(`<div class="alch-card-meta-row"><span class="cm-k">linkedin</span><span class="cm-v"><a href="https://linkedin.com/in/${escHtml(li)}" data-external>${escHtml(li)}</a></span></div>`);
+  if (li) socials.push(`<a href="https://linkedin.com/in/${escAttr(li)}" data-external>linkedin</a>`);
+  const linksRow = socials.length ? linksRowHtml(socials) : "";
   const roleClass = p.role_class || "visiting-scholar";
+  const peeks = cardPeeks(p);
   return `
     <article class="alch-card is-clickable alch-card-person alch-card-role-${escAttr(roleClass)}" data-record-id="${escHtml(p.record_id)}" data-display-id="${displayId(idx)}" tabindex="0" role="button" aria-label="${escHtml(p.name)} — open profile">
       <div class="alch-card-head">
@@ -192,15 +211,16 @@ export function personCardHtml(p, idx, ctx = {}) {
           ${p.domain ? `<div class="alch-card-domain">${escHtml(domainLabel(p.domain))}</div>` : ""}
           <div class="alch-card-name">${escHtml(p.name)}</div>
           ${p.role ? `<p class="alch-card-sub">${escHtml(p.role)}</p>` : ""}
+          ${peeks.anchors}
         </div>
       </div>
       <div class="alch-card-meta">
         ${teamLabel ? `<div class="alch-card-meta-row"><span class="cm-k">team</span><span class="cm-v">${escHtml(teamLabel)}</span></div>` : ""}
         <div class="alch-card-meta-row"><span class="cm-k">geo</span><span class="cm-v">${escHtml(p.geo || "—")}</span></div>
-        ${links.join("")}
+        ${linksRow}
       </div>
       ${cardChipsHtml(p.go_to_them_for)}
-      ${nowOverlayHtml(p)}
+      ${peeks.layers}
     </article>`;
 }
 
