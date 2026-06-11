@@ -13632,18 +13632,21 @@ html, body { background: var(--ed-bg-0); }
  * bump text contrast everywhere it was below readable.
  * ═══════════════════════════════════════════════════════════════════ */
 
-/* Page-level warm radial wash — slightly brighter at the top centre,
-   fades to near-black at the corners. Gives the whole stage depth
-   without changing the read of the editorial dark theme. */
+/* Page-level warm radial wash — espresso, not near-black (2026-06
+   restyle back toward the original field-guide warmth): the page is the
+   dark layer of a two-step warm elevation, with the specimen panels
+   sitting visibly lighter on top. */
 html, body {
-  background: radial-gradient(ellipse 140% 100% at 50% -10%, #1a1612 0%, #0e0c0a 55%, #08070a 100%);
+  background: radial-gradient(ellipse 140% 100% at 50% -10%, #2c2728 0%, #231f20 55%, #1a1718 100%);
 }
 
 /* Alchemy stage + network/metrics stages get the same gradient so the
-   chrome backdrop is unified across views. */
+   chrome backdrop is unified across views. The June-5 design sits on the
+   warm charcoal (--abyss family); the warmth comes from the oxide washes
+   on the panels, not from a brown page. */
 .alchemy-view, #alchemy-view,
 #network-view, #metrics-view {
-  background: radial-gradient(ellipse 130% 90% at 50% -5%, #16130f 0%, #0d0c0a 60%, #0a0908 100%);
+  background: radial-gradient(ellipse 130% 90% at 50% -5%, #2a2526 0%, #221e1f 60%, #1b1819 100%);
 }
 
 /* ── back / edit-on-github / pill actions — proper readable chips ── */
@@ -18096,17 +18099,28 @@ html[data-theme="light"] .cb-headrow {
  * the oxide cohort hairline is kept since it reads on both themes. */
 html[data-theme="light"] .alch-card {
   background: linear-gradient(180deg, #FFFFFF 0%, #F4EFE6 100%);
-  border-top-color: rgba(var(--ink-rgb), 0.10);
+  border-color: rgba(var(--ink-rgb), 0.12);
 }
 html[data-theme="light"] .alch-card:hover {
   background: linear-gradient(180deg, #FFFFFF 0%, #EFE8DD 100%);
-  border-top-color: rgba(var(--ink-rgb), 0.22);
+  border-color: rgba(var(--ink-rgb), 0.24);
 }
 html[data-theme="light"] .alch-card-membership-cohort {
   background: linear-gradient(180deg, #FCF7F1 0%, #F3EADF 100%);
+  border-color: color-mix(in srgb, var(--alchemy-oxide-bright) 36%, transparent);
 }
 html[data-theme="light"] .alch-card-membership-cohort:hover {
   background: linear-gradient(180deg, #FFFFFF 0%, #F1E6D9 100%);
+  border-color: color-mix(in srgb, var(--alchemy-oxide-bright) 58%, transparent);
+}
+/* Dossier panel — same paper treatment as the cards in light mode. */
+html[data-theme="light"] .alch-detail-dossier {
+  background: linear-gradient(180deg, #FFFFFF 0%, #F6F1E9 100%);
+  border-color: rgba(var(--ink-rgb), 0.12);
+  box-shadow: none;
+}
+html[data-theme="light"] .alch-card-now {
+  background: color-mix(in srgb, #FFFFFF 95%, transparent);
 }
 
 /* Collab board adjacency matrix — the sticky column-header row hardcodes a
@@ -19863,16 +19877,158 @@ html[data-theme="light"] .alch-asks-verb-pill.has-verb-color[aria-pressed="true"
 
 /* Cohort detail dossier parity with the public web profile pages. */
 .alch-detail-dossier {
+  position: relative;
   display: grid;
-  grid-template-columns: minmax(230px, 320px) minmax(0, 1fr);
+  grid-template-columns: minmax(260px, 330px) minmax(0, 1fr);
   min-height: 0;
-  border-top: 1px solid var(--ed-rule, var(--alchemy-rule));
-  border-bottom: 1px solid var(--ed-rule, var(--alchemy-rule));
+  /* June-5 web dossier recipe (a0114d97), verbatim: translucent warm
+   * base + diagonal oxide wash + cream sheen, scanline texture overlay,
+   * rail inset. */
+  border: 1px solid rgba(241, 236, 231, 0.18);
+  border-radius: 8px;
+  overflow: hidden;
+  background:
+    linear-gradient(112deg, rgba(180, 58, 25, 0.16), rgba(180, 58, 25, 0.03) 31%, transparent 54%),
+    linear-gradient(180deg, rgba(247, 241, 236, 0.045), rgba(247, 241, 236, 0.008)),
+    rgba(28, 25, 25, 0.94);
+  padding: 0;
+}
+.alch-detail-dossier::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.035), transparent 14%, transparent 86%, rgba(255, 255, 255, 0.018)),
+    repeating-linear-gradient(180deg, rgba(255, 255, 255, 0.012) 0 1px, transparent 1px 9px);
+  opacity: 0.34;
+}
+.alch-detail-rail,
+.alch-detail-ledger {
+  position: relative;
+  z-index: 1;
+}
+/* Rail type — June-5 values: 36px/500 lowercase upright name, 16px
+ * focus line; the sigil above is the hero at up to 260px, centered. */
+.alch-detail-rail .alch-detail-name {
+  font-size: 36px;
+  font-weight: 500;
+  font-style: normal;
+  letter-spacing: 0;
+  text-transform: lowercase;
+  line-height: 1.2;
+  margin: 8px 0;
+}
+.alch-detail-rail .alch-detail-focus {
+  font-style: normal;
+  font-size: 16px;
+  line-height: 1.35;
+  color: rgba(var(--ink-rgb), 0.74);
+  margin: 0 0 16px;
+}
+.alch-detail-rail .alch-detail-shape {
+  width: min(100%, 260px);
+  justify-self: center;
+  margin: 0 0 16px;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.alch-detail-rail .alch-rail-read { display: grid; gap: 8px; }
+/* Reading sizes: prose at a comfortable 13.5/1.7. */
+.alch-detail-prose,
+.alch-detail-prose p {
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: rgba(var(--ink-rgb), 0.78);
+}
+.alch-detail-ledger .alch-section-stack { gap: 18px; }
+.alch-detail-flat { padding: 18px 0 10px; }
+.alch-detail-ledger .alch-quick-row { min-height: 42px; padding: 12px 0; }
+/* Directory grid — the original shows three generous columns, not a
+ * five-up dense pack. Rows stretch so card heights match per row. */
+.alch-specimens {
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 22px;
+  align-items: stretch;
+}
+
+/* ══ Liquid glass chrome (2026-06) ═══════════════════════════════════
+ * Glass is reserved for CHROME — the floating controls bar, inspector,
+ * readouts, tooltips — surfaces that hover over scrolling content and
+ * have something to refract. Content panels (cards, dossier) stay
+ * material so the blur stays purposeful. */
+:root {
+  --lg-bg:        rgba(40, 35, 36, 0.60);
+  --lg-bg-strong: rgba(38, 33, 34, 0.72);
+  --lg-border:    rgba(241, 236, 231, 0.13);
+  --lg-specular:  inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  --lg-shadow:    0 8px 28px rgba(0, 0, 0, 0.26);
+  --lg-blur:      blur(16px) saturate(1.25);
+}
+:root[data-theme="light"] {
+  --lg-bg:        rgba(255, 255, 255, 0.52);
+  --lg-bg-strong: rgba(255, 255, 255, 0.74);
+  --lg-border:    rgba(27, 20, 17, 0.13);
+  --lg-specular:  inset 0 1px 0 rgba(255, 255, 255, 0.65);
+  --lg-shadow:    0 8px 28px rgba(31, 26, 22, 0.12);
+}
+/* The view controls float as a glass bar and stay pinned while the grid
+ * or stage scrolls underneath — the one place blur earns its keep on
+ * the directory. */
+.alch-view-controls {
+  position: sticky;
+  top: 2px;
+  z-index: 6;
+  padding: 9px 14px;
+  margin: 2px 0 16px;
+  border: 1px solid var(--lg-border);
+  border-bottom: 1px solid var(--lg-border);
+  border-radius: 12px;
+  background: var(--lg-bg);
+  -webkit-backdrop-filter: var(--lg-blur);
+  backdrop-filter: var(--lg-blur);
+  box-shadow: var(--lg-specular), var(--lg-shadow);
+}
+/* Inspector + generated/selected readouts share one glass panel family —
+ * consistent box language across map, journey, stack, and people. */
+.ac-inspector,
+.ac-main-readout {
+  border: 1px solid var(--lg-border);
+  border-radius: 12px;
+  background:
+    linear-gradient(112deg, rgba(180, 58, 25, 0.10), transparent 52%),
+    var(--lg-bg-strong);
+  -webkit-backdrop-filter: var(--lg-blur);
+  backdrop-filter: var(--lg-blur);
+  box-shadow: var(--lg-specular), var(--lg-shadow);
+}
+/* Floating tooltips are pure glass. */
+.alch-constellation-stage .ac-tip {
+  border: 1px solid var(--lg-border);
+  border-radius: 10px;
+  background: var(--lg-bg-strong);
+  -webkit-backdrop-filter: var(--lg-blur);
+  backdrop-filter: var(--lg-blur);
+  box-shadow: var(--lg-specular), var(--lg-shadow);
+}
+/* Every constellation stage sits in the same material panel as the
+ * dossier — one box language across all cohort views. */
+.alch-constellation-stage {
+  border: 1px solid rgba(241, 236, 231, 0.12);
+  border-radius: 8px;
+  background:
+    linear-gradient(112deg, rgba(180, 58, 25, 0.06), transparent 50%),
+    rgba(28, 25, 25, 0.45);
+}
+html[data-theme="light"] .alch-constellation-stage {
+  border-color: rgba(27, 20, 17, 0.12);
+  background: linear-gradient(180deg, #FFFFFF 0%, #F6F1E9 100%);
 }
 .alch-detail-rail {
   min-width: 0;
-  padding: 28px 28px 28px 0;
-  border-right: 1px solid var(--ed-rule, var(--alchemy-rule));
+  padding: 20px;
+  border-right: 1px solid rgba(241, 236, 231, 0.11);
+  background: linear-gradient(180deg, rgba(13, 12, 10, 0.42), rgba(13, 12, 10, 0.14));
 }
 .alch-detail-rail .alch-detail-shape {
   width: min(100%, 220px);
@@ -19970,10 +20126,10 @@ html[data-theme="light"] .alch-asks-verb-pill.has-verb-color[aria-pressed="true"
 }
 .alch-detail-ledger {
   min-width: 0;
-  padding: 28px 0 32px 32px;
+  padding: 20px 24px 28px;
   display: grid;
   align-content: start;
-  gap: 22px;
+  gap: 20px;
 }
 .alch-ledger-head .alch-detail-h {
   margin: 0;
@@ -20021,13 +20177,13 @@ html[data-theme="light"] .alch-asks-verb-pill.has-verb-color[aria-pressed="true"
   min-height: 24px;
   max-width: min(100%, 62ch);
   padding: 3px 8px;
-  border: 1px solid var(--ed-rule-2, var(--alchemy-rule));
+  border: 1px solid rgba(var(--ink-rgb), 0.16);
   border-radius: 4px;
   background: rgba(var(--ink-rgb), 0.018);
   color: var(--ed-ink-1, var(--alchemy-paper-warm));
   font-family: var(--ed-mono, var(--font-mono));
-  font-size: 11px;
-  line-height: 1.3;
+  font-size: 12px;
+  line-height: 1.25;
   overflow-wrap: anywhere;
   text-decoration: none;
 }
@@ -20037,13 +20193,13 @@ button.alch-quick-link {
 }
 .alch-quick-link:hover,
 .alch-quick-link:focus-visible {
-  color: var(--ed-ink-1, var(--alchemy-oxide-bright));
-  border-color: var(--ed-ink-1, var(--alchemy-oxide-bright));
-  background: rgba(var(--ink-rgb), 0.045);
+  color: var(--alchemy-oxide-hot, #d05332);
+  border-color: color-mix(in srgb, var(--alchemy-oxide-hot, #d05332) 55%, transparent);
+  background: rgba(180, 58, 25, 0.08);
 }
 .alch-quick-text {
   color: var(--ed-ink-2, var(--alchemy-ink));
-  border-color: var(--ed-rule, var(--alchemy-rule));
+  border-color: rgba(var(--ink-rgb), 0.11);
 }
 .alch-quick-text span,
 .alch-quick-pill span {
@@ -20075,6 +20231,17 @@ button.alch-quick-link {
   min-height: 0;
   padding: 8px 0;
 }
+/* Multi-item values: short pills (stage / evidence / upside…) share a
+ * line; prose items each own a full row. Two long items flowing inline
+ * produced a ragged fake second column (the "provides" rows). */
+.alch-team-quick .alch-quick-v {
+  column-gap: 16px;
+  row-gap: 5px;
+}
+.alch-team-quick .alch-quick-text {
+  flex: 1 1 100%;
+  max-width: 72ch;
+}
 .alch-team-quick .alch-quick-link,
 .alch-team-quick .alch-quick-pill,
 .alch-team-quick .alch-quick-text {
@@ -20094,6 +20261,32 @@ button.alch-quick-link {
 .alch-priority-stack {
   gap: 0;
 }
+/* Flat section — the dossier's default block (2026-06 restyle): same
+ * hairline + small-label language as the disclosure, but content simply
+ * visible. Nothing about it suggests clicking. */
+.alch-detail-flat {
+  border: 0;
+  border-top: 1px solid rgba(var(--ink-rgb), 0.08);
+  border-radius: 0;
+  background: transparent;
+  padding: 16px 0 6px;
+  position: relative;
+}
+.alch-detail-flat::before {
+  display: none; /* the section-generation gradient hairline would double the border-top */
+}
+.alch-flat-label {
+  margin: 0 0 12px;
+  font-family: var(--ed-mono, var(--font-mono));
+  font-size: 10.5px;
+  letter-spacing: 0.20em;
+  text-transform: uppercase;
+  color: rgba(var(--ink-rgb), 0.58);
+}
+.alch-detail-flat .alch-section-body {
+  animation: none;
+}
+
 .alch-detail-disclosure {
   border: 0;
   border-top: 1px solid var(--ed-rule, var(--alchemy-rule));
