@@ -63,16 +63,18 @@
   position: relative;
   display: flex; flex-direction: column; gap: 13px;
   padding: 18px 18px 16px;
-  background: linear-gradient(180deg, #281f18 0%, #211a14 100%);
+  /* Clearly elevated taupe panel on the espresso page — the two-step
+   * warm elevation is the signature of the original field-guide look. */
+  background: linear-gradient(180deg, #352b21 0%, #2c231a 100%);
   color: var(--ed-ink-2);
-  border: 1px solid rgba(241, 236, 231, 0.08);
+  border: 1px solid rgba(241, 236, 231, 0.11);
   border-radius: 12px;
-  box-shadow: none;
+  box-shadow: 0 1px 0 rgba(241, 236, 231, 0.04) inset, 0 2px 10px rgba(0, 0, 0, 0.18);
   transition: background 220ms ease-out, border-color 220ms ease-out;
 }
 .alch-card:hover {
-  background: linear-gradient(180deg, #2e241c 0%, #261e17 100%);
-  border-color: rgba(241, 236, 231, 0.18);
+  background: linear-gradient(180deg, #3c3126 0%, #33291e 100%);
+  border-color: rgba(241, 236, 231, 0.20);
   cursor: pointer;
 }
 .alch-card.is-clickable:active { transform: translateY(0); }
@@ -328,13 +330,13 @@
  * fights the radius); confident but understated at rest. */
 .alch-card-membership-cohort,
 .alch-card-role-cohort-member {
-  border-color: color-mix(in srgb, var(--alchemy-oxide-bright) 32%, transparent);
-  background: linear-gradient(180deg, #2c2016 0%, #241a12 100%);
+  border-color: color-mix(in srgb, var(--alchemy-oxide-bright) 34%, transparent);
+  background: linear-gradient(180deg, #392b1e 0%, #2f2317 100%);
 }
 .alch-card-membership-cohort:hover,
 .alch-card-role-cohort-member:hover {
-  border-color: color-mix(in srgb, var(--alchemy-oxide-bright) 55%, transparent);
-  background: linear-gradient(180deg, #322517 0%, #2a1e14 100%);
+  border-color: color-mix(in srgb, var(--alchemy-oxide-bright) 56%, transparent);
+  background: linear-gradient(180deg, #403023 0%, #36281a 100%);
 }
 
 /* Visiting: untreated. Inherits the base card look so visiting teams

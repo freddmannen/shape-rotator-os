@@ -13632,18 +13632,19 @@ html, body { background: var(--ed-bg-0); }
  * bump text contrast everywhere it was below readable.
  * ═══════════════════════════════════════════════════════════════════ */
 
-/* Page-level warm radial wash — slightly brighter at the top centre,
-   fades to near-black at the corners. Gives the whole stage depth
-   without changing the read of the editorial dark theme. */
+/* Page-level warm radial wash — espresso, not near-black (2026-06
+   restyle back toward the original field-guide warmth): the page is the
+   dark layer of a two-step warm elevation, with the specimen panels
+   sitting visibly lighter on top. */
 html, body {
-  background: radial-gradient(ellipse 140% 100% at 50% -10%, #1a1612 0%, #0e0c0a 55%, #08070a 100%);
+  background: radial-gradient(ellipse 140% 100% at 50% -10%, #2a211a 0%, #1d1712 55%, #151009 100%);
 }
 
 /* Alchemy stage + network/metrics stages get the same gradient so the
    chrome backdrop is unified across views. */
 .alchemy-view, #alchemy-view,
 #network-view, #metrics-view {
-  background: radial-gradient(ellipse 130% 90% at 50% -5%, #16130f 0%, #0d0c0a 60%, #0a0908 100%);
+  background: radial-gradient(ellipse 130% 90% at 50% -5%, #271e17 0%, #1c1611 60%, #16110c 100%);
 }
 
 /* ── back / edit-on-github / pill actions — proper readable chips ── */
@@ -18114,6 +18115,7 @@ html[data-theme="light"] .alch-card-membership-cohort:hover {
 html[data-theme="light"] .alch-detail-dossier {
   background: linear-gradient(180deg, #FFFFFF 0%, #F6F1E9 100%);
   border-color: rgba(var(--ink-rgb), 0.12);
+  box-shadow: none;
 }
 html[data-theme="light"] .alch-card-now {
   background: color-mix(in srgb, #FFFFFF 95%, transparent);
@@ -19877,12 +19879,22 @@ html[data-theme="light"] .alch-asks-verb-pill.has-verb-color[aria-pressed="true"
   grid-template-columns: minmax(230px, 320px) minmax(0, 1fr);
   min-height: 0;
   /* Warm specimen panel (2026-06 restyle): the dossier sits in the same
-   * rounded warm-brown frame as the directory cards instead of bleeding
-   * into the near-black page. */
-  background: linear-gradient(180deg, #281f18 0%, #211a14 100%);
-  border: 1px solid rgba(241, 236, 231, 0.08);
+   * elevated taupe frame as the directory cards — the two-step warm
+   * elevation from the original field-guide design. */
+  background: linear-gradient(180deg, #322820 0%, #2a211a 100%);
+  border: 1px solid rgba(241, 236, 231, 0.11);
   border-radius: 14px;
+  box-shadow: 0 1px 0 rgba(241, 236, 231, 0.04) inset, 0 2px 12px rgba(0, 0, 0, 0.18);
   padding: 4px 28px;
+}
+/* Rail name — the original's compact lowercase semibold, not a display
+ * headline; the sigil above it is the hero. */
+.alch-detail-rail .alch-detail-name {
+  font-size: 38px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  text-transform: lowercase;
+  line-height: 1.08;
 }
 .alch-detail-rail {
   min-width: 0;

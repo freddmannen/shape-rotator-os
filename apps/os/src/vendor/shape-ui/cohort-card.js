@@ -136,9 +136,9 @@ export function teamCardHtml(t, idx, ctx = {}) {
       <div class="alch-card-head">
         <div class="alch-card-shape"><canvas data-shape-fam="${s ? s.fam : 0}" data-shape-kind="${escAttr(kind)}" data-shape-scale="1.1" data-shape-seed="${escAttr(t.record_id)}"></canvas></div>
         <div class="alch-card-title">
+          <div class="alch-card-domain">${escHtml(domainLabel(t.domain))}</div>
           <div class="alch-card-name">${escHtml(t.name)}</div>
           ${t.focus ? `<p class="alch-card-sub">${escHtml(t.focus)}</p>` : ""}
-          <div class="alch-card-domain">${escHtml(domainLabel(t.domain))}</div>
         </div>
       </div>
       <div class="alch-card-meta">
@@ -189,9 +189,9 @@ export function personCardHtml(p, idx, ctx = {}) {
       <div class="alch-card-head">
         <div class="alch-card-shape"><canvas data-shape-fam="${fam}" data-shape-kind="person" data-shape-scale="1.1" data-shape-seed="${escAttr(p.record_id)}"></canvas></div>
         <div class="alch-card-title">
+          ${p.domain ? `<div class="alch-card-domain">${escHtml(domainLabel(p.domain))}</div>` : ""}
           <div class="alch-card-name">${escHtml(p.name)}</div>
           ${p.role ? `<p class="alch-card-sub">${escHtml(p.role)}</p>` : ""}
-          ${p.domain ? `<div class="alch-card-domain">${escHtml(domainLabel(p.domain))}</div>` : ""}
         </div>
       </div>
       <div class="alch-card-meta">
