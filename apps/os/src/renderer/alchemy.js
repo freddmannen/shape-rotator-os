@@ -25,14 +25,11 @@ import {
   escHtml, escAttr, normalizeLinkHref, normalizeGithubAccount,
   buildEditPRUrl,
   teamCardHtml, personCardHtml,
+  cohortRosterForTeam, cohortRosterSummary, compactCohortLinkItems,
   buildCalendarRows, drawCalendar,
-  renderWeekView as renderCalendarWeekView,
   loadCalendar as loadCalendarData,
   currentWeekIdx as calendarCurrentWeekIdx,
   parseWeekRow as calendarParseWeekRow,
-  attachWeekViewBehavior as attachCalendarMobileBehavior,
-  exportWeekPng as exportCalendarWeekPng,
-  openEventDetail as openCalendarEventDetail,
 } from "@shape-rotator/shape-ui";
 import {
   aggregateSkillAreas, buildCohortIndex, buildCollabModel, collabAffKey, collabHasText,
@@ -44,7 +41,7 @@ import {
   contextSourceById as findContextSourceById,
 } from "./context-vault-model.js";
 import { getCohortSurface, subscribeToCohortChanges, isSyncAvailable } from "./cohort-source.js";
-import { unreadModes, markModeSeen, fingerprintItems, unreadForFingerprints, markFingerprintsSeen } from "./whats-new.js";
+import { unreadCounts, markModeSeen, fingerprintItems, unreadCountForFingerprints, markFingerprintsSeen } from "./whats-new.js";
 import { getCohortTimeline } from "./cohort-timeline.js";
 import { resolvePRForCurrentUser, clearForkCache } from "./gh-fork.js";
 import { enrichPeople } from "./gh-user.js";
@@ -61,7 +58,13 @@ import {
 // the 7-rail nav with a 4-blob constellation. Lives behind data-alch-mode
 // "membrane" so the legacy modes stay reachable while we evaluate.
 import { mountMembrane } from "./membrane/index.js";
-import { CALENDAR_TRANSCRIPT_MATCHES } from "../content/context/calendar-transcript-matches.js";
+// The calendar page — one-view week timeline + presence tab (2026-06
+// redesign; replaced the day/week/presence sub-tabbed page).
+import {
+  renderCalendarPage,
+  attachCalendarPageBehavior,
+  openCalendarEvent,
+} from "./calendar.js";
 import { renderIntelEmbedded, wireIntelEmbedded, intelSnapshotMeta } from "./intel/intel.js";
 
 const ALCHEMY_LS_KEY  = "srwk:alchemy_mode";
@@ -163,7 +166,6 @@ const state = {
   cohortTimelineError: "",
   constellationTimelineIdx: null,  // selected snapshot index within cohortTimeline.snapshots
   constellationShowDelta: false,
-  constellationDrawerRecordId: null,
   profile: null,       // local-only: { user, editor state, ... }
   programPage: null,   // active program-handbook page slug (overview | success | rules | schedule)
   atlasFocus: null,    // active tag in the atlas view (null = whole-graph mode)
@@ -176,14 +178,13 @@ const state = {
   constSelection: null,       // persistent constellation inspector selection: { type:"team"|"person", rid } | { type:"edge", from, to }
   renderSeq: 0,               // monotonic render guard; stale delayed swaps must not overwrite the latest view
   calendar: {                     // calendar tab state — see renderCalendar()
-    sub: "day",                   // "day" (typeset today agenda) | "week" (broadsheet grid) | "presence" (availability gantt)
     weekIdx: null,                // 0..9; resolved on first render via calendarCurrentWeekIdx()
-    dayIdx: null,                 // 0..6 (mon..sun) within visible week; null = pick today if in week, else mon
+    view: "cal",                  // "cal" (timeline grid) | "presence" (availability gantt)
     data: null,                   // raw Phala JSON — live response or bundled snapshot
     source: null,                 // "live" | "bundled" | null (no data yet)
-    initialMount: true,           // first render-of-week-view? drives mobile scroll-to-today
-    detachMobile: null,           // teardown returned by attachCalendarMobileBehavior
     loading: false,               // true while the async live fetch is in flight
+    initialMount: true,           // first render? drives scroll-to-now
+    detach: null,                 // teardown returned by attachCalendarPageBehavior
   },
   events: [],          // normalized feed items, latest-first
   fetchedAt: 0,
@@ -242,6 +243,8 @@ export function mount(container) {
     // back as a teleport-router surface.
     if (saved === "feed")      { state.mode = "shapes"; localStorage.setItem(ALCHEMY_LS_KEY, "shapes"); }
     if (saved === "pulse")     { state.mode = "shapes"; localStorage.setItem(ALCHEMY_LS_KEY, "shapes"); }
+    // calendar2 graduated to THE calendar (2026-06); old saved modes land there.
+    if (saved === "calendar2") { state.mode = "calendar"; localStorage.setItem(ALCHEMY_LS_KEY, "calendar"); }
     // Context page view (articles | raw | signals | data) survives reloads.
     state.contextVault.mode = contextNormalizeView(localStorage.getItem(CONTEXT_VIEW_LS_KEY) || state.contextVault.mode);
     // intel folded into the context page (2026-06): old intel users land on
@@ -598,15 +601,48 @@ function activeDetailCohort() {
   return state.detailReturnMode === "constellation" ? activeConstellationCohort() : state.cohort;
 }
 
-// What's-new: Slack-style unread on the rail. A mode whose cohort
-// content changed since the user last viewed it gets `.ar-unread` —
-// the row renders at full ink (color only; no text, no dots).
+// What's-new: a mode whose cohort content changed since the user last
+// viewed it gets a numbered circle in the rail gutter left of its icon
+// (the count of new/changed records). The badge is absolutely
+// positioned, so the icon and label never move; it clears once the
+// page is viewed.
+//
+// DISABLED for now (2026-06-11) — flip to true to re-enable the badges.
+// While off, no badge ever renders, but the seen-baseline bookkeeping
+// (markModeSeen / markFingerprintsSeen) keeps running silently so
+// re-enabling won't flood the rail with stale "new" counts.
+const WHATS_NEW_ENABLED = false;
+
 function updateRailUnread() {
   if (!state.rail || !state.cohort) return;
-  const unread = unreadModes(state.cohort);
-  if (unreadForFingerprints("context", contextVaultFingerprints())) unread.add("context");
+  if (!WHATS_NEW_ENABLED) {
+    // Strip anything a previous session may have painted.
+    for (const btn of state.rail.querySelectorAll(".alchemy-rail-btn")) {
+      btn.classList.remove("ar-unread");
+      btn.querySelector(".ar-unread-badge")?.remove();
+    }
+    return;
+  }
+  const counts = unreadCounts(state.cohort);
+  const ctxCount = unreadCountForFingerprints("context", contextVaultFingerprints());
+  if (ctxCount > 0) counts.context = ctxCount;
+  const calCount = unreadCountForFingerprints("calendar-grid", calendarFingerprints());
+  if (calCount > 0) counts.calendar = calCount;
   for (const btn of state.rail.querySelectorAll(".alchemy-rail-btn")) {
-    btn.classList.toggle("ar-unread", unread.has(btn.dataset.alchMode));
+    const n = counts[btn.dataset.alchMode] || 0;
+    btn.classList.toggle("ar-unread", n > 0);
+    let badge = btn.querySelector(".ar-unread-badge");
+    if (n > 0) {
+      if (!badge) {
+        badge = document.createElement("span");
+        badge.className = "ar-unread-badge";
+        badge.setAttribute("aria-hidden", "true");
+        btn.appendChild(badge);
+      }
+      badge.textContent = n > 9 ? "9+" : String(n);
+    } else if (badge) {
+      badge.remove();
+    }
   }
 }
 
@@ -758,8 +794,16 @@ function renderModeContent() {
     // refresh (subscription re-render while the user is on another tab or
     // the window is hidden) never marks content seen the user hasn't seen.
     if (state.active && !document.hidden) {
-      markModeSeen(state.mode, state.cohort);
-      if (state.mode === "context") markFingerprintsSeen("context", contextVaultFingerprints());
+      // Map sub-views onto their rail entry (same mapping as
+      // syncRailSelection): any cohort view marks the cohort page seen,
+      // intel marks context — the badge tracks "did I look at the PAGE",
+      // not which sub-view happened to be active.
+      let seenMode = state.mode === "collab" ? "constellation" : state.mode;
+      if (seenMode === "constellation") seenMode = "shapes";
+      if (seenMode === "intel") seenMode = "context";
+      markModeSeen(seenMode, state.cohort);
+      if (seenMode === "context") markFingerprintsSeen("context", contextVaultFingerprints());
+      if (seenMode === "calendar") markFingerprintsSeen("calendar-grid", calendarFingerprints());
     }
     updateRailUnread();
   } catch (err) {
@@ -1284,6 +1328,7 @@ function computeMembraneData() {
 // Public hook used by membrane/index.js.
 window.__srwkAlchemyJump = function alchemyJumpFromMembrane(mode, opts) {
   if (mode === "collab") {
+    clearDetailForNavigation();
     state.mode = "constellation";
     state.constellationMode = "collab";
     try {
@@ -1297,6 +1342,7 @@ window.__srwkAlchemyJump = function alchemyJumpFromMembrane(mode, opts) {
   // intel lives inside the context page now — jump to its view there.
   if (mode === "intel") { mode = "context"; opts = { ...(opts || {}), contextView: opts?.contextView || "signals" }; }
   if (!ALCHEMY_MODES.includes(mode)) return;
+  clearDetailForNavigation();
   state.mode = mode;
   if (mode === "context" && opts && opts.contextView) {
     state.contextVault.mode = contextNormalizeView(opts.contextView);
@@ -1332,16 +1378,7 @@ window.__srwkAlchemyJump = function alchemyJumpFromMembrane(mode, opts) {
 // their profile in the cohort surface (shapes mode with detail page).
 window.__srwkAlchemyShowRecord = function showRecordFromMembrane(recordId, returnMode = 'shapes') {
   if (!recordId) return;
-  if (!ALCHEMY_MODES.includes(returnMode)) returnMode = 'shapes';
-  state.mode = returnMode;
-  state.detailRecordId = String(recordId);
-  state.detailReturnMode = returnMode;
-  try {
-    localStorage.setItem(ALCHEMY_LS_KEY, returnMode);
-    localStorage.setItem(DETAIL_LS_KEY, JSON.stringify({ recordId: String(recordId), returnMode }));
-  } catch {}
-  syncRailSelection();
-  render();
+  openDetail(recordId, returnMode);
 };
 
 // Display id "SHAPE-NN" from the team's index in the array.
@@ -1447,23 +1484,24 @@ function renderShapes() {
     counts.set(chip.id, sourceRecords.filter(r => chip.match(r)).length);
   }
   const membershipChips = chipSet.map(chip => `
-    <button class="alch-shapes-chip alch-shapes-chip-membership" data-membership-filter="${escAttr(chip.id)}" type="button" aria-selected="${chip.id === activeChip.id}">${escHtml(chip.label)} <span class="ascn">${counts.get(chip.id) || 0}</span></button>
+    <button class="alch-shapes-chip alch-shapes-chip-membership" data-membership-filter="${escAttr(chip.id)}" type="button" role="tab" aria-selected="${chip.id === activeChip.id}">${escHtml(chip.label)} <span class="ascn">${counts.get(chip.id) || 0}</span></button>
   `).join("");
 
   const chips = `
     <div class="alch-view-controls">
       <nav class="alch-shapes-filter" role="tablist" aria-label="filter by kind">
-        <button class="alch-shapes-chip" data-shapes-filter="works"  type="button" aria-selected="${filter === "works"}">teams & projects <span class="ascn">${nWorks}</span></button>
-        <button class="alch-shapes-chip" data-shapes-filter="people" type="button" aria-selected="${filter === "people"}">individuals <span class="ascn">${nPeople}</span></button>
+        <button class="alch-shapes-chip" data-shapes-filter="works"  type="button" role="tab" aria-selected="${filter === "works"}">teams & projects <span class="ascn">${nWorks}</span></button>
+        <button class="alch-shapes-chip" data-shapes-filter="people" type="button" role="tab" aria-selected="${filter === "people"}">individuals <span class="ascn">${nPeople}</span></button>
       </nav>
       <nav class="alch-shapes-filter alch-shapes-filter-membership" role="tablist" aria-label="filter by membership">
         ${membershipChips}
       </nav>
+      <button id="dossier-export-png" class="alch-shapes-chip" type="button">export dossier (png)</button>
     </div>
   `;
-  const cardCtx = { people: state.cohort?.people || [] };
+  const cardCtx = { people: state.cohort?.people || [], teams: state.cohort?.teams || [] };
   const cards = records.map((r, idx) => {
-    if (r._kind === "person") return personCardHtml(r, idx);
+    if (r._kind === "person") return personCardHtml(r, idx, cardCtx);
     return teamCardHtml(r, idx, cardCtx);
   }).join("");
   const emptyMsg = filter === "people"
@@ -1474,7 +1512,7 @@ function renderShapes() {
     : `<p class="alch-pf-pick">${emptyMsg}</p>`;
   state.canvas.innerHTML = `
     <div class="alch-cohort-page" data-cohort-view="directory">
-      ${cohortPageHead("directory", { side: `<button id="dossier-export-png" class="cal-action" type="button">export dossier (png)</button>` })}
+      ${cohortPageHead("directory")}
       ${chips}
       ${grid}
       <p class="alch-callout"><strong>cohort directory · v0.2</strong><br/>
@@ -1829,31 +1867,47 @@ const COHORT_VIEW_DEK = {
 // the OS's two "understanding" surfaces read as one design. `side` is
 // optional per-view meta or actions (kept to one quiet element at rest).
 function pageHeadHtml({ kicker, title, dek, side = "", nav = "" }) {
-  // Strip-style header (2026-06 design pass): no kicker/title — the rail
-  // already names the page. The dek (purpose line) sits inside the shared
-  // outlined intro strip with any side action right-aligned; the view nav
-  // follows. One block (strip + nav together) so host pages with their own
-  // flex gaps can't change the head→nav rhythm. kicker/title are accepted
-  // for call-site compatibility but intentionally not rendered. A strip
-  // with no content keeps its reserved height but hides the outline
-  // (see the .alch-page-intro:empty rule), so it must stay whitespace-free.
-  void kicker; void title;
-  const inner = `${dek ? `<span>${escHtml(dek)}</span>` : ""}${side ? `<div class="alch-page-head-side">${side}</div>` : ""}`;
+  // Strip-style header (2026-06 design pass): no kicker/title/dek — the
+  // rail already names the page and the boxed explainer strip was removed
+  // as clutter. Only per-view side actions render (right-aligned row); the
+  // view nav follows. One block (row + nav together) so host pages with
+  // their own flex gaps can't change the head→nav rhythm. kicker/title/dek
+  // are accepted for call-site compatibility but intentionally not rendered.
+  void kicker; void title; void dek;
   return `
     <div class="alch-page-headgroup">
-      <div class="alch-page-intro">${inner}</div>
+      ${side ? `<div class="alch-page-intro"><div class="alch-page-head-side">${side}</div></div>` : ""}
       ${nav}
     </div>`;
 }
 
-function cohortPageHead(view, { side = "" } = {}) {
+function cohortPageHead(view, { side = "", dek = "" } = {}) {
   return pageHeadHtml({
     kicker: "shape rotator cohort",
     title: "cohort",
-    dek: COHORT_VIEW_DEK[view] || COHORT_VIEW_DEK.directory,
+    dek: dek || COHORT_VIEW_DEK[view] || COHORT_VIEW_DEK.directory,
     side,
     nav: constellationNav(view),
   });
+}
+
+// Cross-view selection cue. state.constSelection survives view switches by
+// design (select a team on the map, see where it sits on pmf evidence) —
+// but a selection you can't see is a trap, so every constellation view
+// renders the same chip: who is selected, one click to clear. The chip is
+// also the discoverable sibling of the Escape shortcut.
+function constSelectionChipHtml() {
+  const sel = state.constSelection;
+  if (!sel || (sel.type !== "team" && sel.type !== "person")) return "";
+  const cohort = activeConstellationCohort();
+  const rec = sel.type === "person"
+    ? (cohort?.people || []).find(p => p.record_id === sel.rid)
+    : (cohort?.teams || []).find(t => t.record_id === sel.rid);
+  const name = rec?.name || sel.rid;
+  return `
+    <button type="button" class="ac-selection-chip" data-const-clear-selection aria-label="${escAttr(`clear selection: ${name}`)}">
+      <span>selected</span><strong>${escHtml(name)}</strong><i aria-hidden="true">×</i>
+    </button>`;
 }
 
 const CONST_MAP_LAYOUTS = [
@@ -3353,6 +3407,64 @@ function constJourneyReadoutHtml(visibleTeams = [], allTeams = visibleTeams) {
     </section>`;
 }
 
+// Selected-team readouts — first click on an entity selects it and the
+// view's readout answers in THIS view's terms (journey read here, stack
+// placement below); a second click on the entity — or its name in the
+// readout — commits to the full record page. The generated cohort-level
+// read returns when the selection clears.
+function constJourneySelectedReadoutHtml(allTeams) {
+  const sel = state.constSelection;
+  if (sel?.type !== "team") return "";
+  const team = (Array.isArray(allTeams) ? allTeams : []).find(t => t.record_id === sel.rid);
+  if (!team) return "";
+  const j = journeyFor(team);
+  const assessed = journeyAssessed(team);
+  const chips = assessed
+    ? `
+      <span>stage<em>${escHtml(`${j.stage} ${JOURNEY_STAGE_LABELS[j.stage] || ""}`.trim())}</em></span>
+      <span>evidence<em>${escHtml(`${j.evidence_quality}/5`)}</em></span>
+      <span>upside<em>${escHtml(`${j.market_upside}/5`)}</em></span>
+      ${j.primary_bottleneck ? `<span>bottleneck<em>${escHtml(j.primary_bottleneck)}</em></span>` : ""}`
+    : `<span>journey read<em>not declared</em></span>`;
+  const line = assessed
+    ? constShortText(j.problem || j.next_milestone || "", 150)
+    : "Profile context only — the dot's position is inferred, not asserted.";
+  return `
+    <section class="ac-main-readout is-journey-readout is-selected-readout" aria-label="selected team journey read">
+      <div class="ac-inspector-kicker">selected · journey read</div>
+      <h3><button type="button" class="ac-inspector-name-link" data-const-open-record="${escAttr(team.record_id)}">${escHtml(team.name || team.record_id)}</button></h3>
+      ${line ? `<p>${escHtml(line)}</p>` : ""}
+      <div class="ac-view-chips">${chips}</div>
+      <p class="ac-readout-hint">click the dot again — or the name above — for the full record</p>
+    </section>`;
+}
+
+function constStackSelectedReadoutHtml(ctx) {
+  const sel = state.constSelection;
+  if (sel?.type !== "team") return "";
+  const team = ctx?.teamById?.get?.(sel.rid)
+    || (activeConstellationCohort()?.teams || []).find(t => t.record_id === sel.rid);
+  if (!team) return "";
+  const item = constStackItemForTeam(ctx, sel.rid);
+  const role = item?.role || constMarketRoleForTeam(team);
+  const evidence = item?.evidence || constEvidenceModeForTeam(team, ctx);
+  const evidenceRead = evidence.key === "profile"
+    ? evidence.label
+    : `${evidence.label} · ${String(evidence.value)}/5`;
+  return `
+    <section class="ac-main-readout is-stack-readout is-selected-readout" aria-label="selected team stack read">
+      <div class="ac-inspector-kicker">selected · stack read</div>
+      <h3><button type="button" class="ac-inspector-name-link" data-const-open-record="${escAttr(team.record_id)}">${escHtml(team.name || team.record_id)}</button></h3>
+      ${role.reason ? `<p>${escHtml(constShortText(role.reason, 150))}</p>` : ""}
+      <div class="ac-view-chips">
+        <span>layer<em>${escHtml(role.label)}</em></span>
+        ${role.secondary ? `<span>also<em>${escHtml(role.secondary.label)}</em></span>` : ""}
+        <span>proof<em>${escHtml(evidenceRead)}</em></span>
+      </div>
+      <p class="ac-readout-hint">click the entry again — or the name above — for the full record</p>
+    </section>`;
+}
+
 function constTeamOperatingHtml(team) {
   const rows = [
     ["now", team?.now],
@@ -4616,11 +4728,11 @@ function renderJourney() {
   state.canvas.innerHTML = `
     <div class="alch-cohort-page" data-cohort-view="journey">
     ${cohortPageHead("journey")}
-    <div class="alch-view-controls">${filterBar}</div>
+    <div class="alch-view-controls">${filterBar}${constSelectionChipHtml()}</div>
     <div class="alch-constellation" data-constellation-view="journey">
       <div class="alch-const-workbench is-single">
         <div class="alch-const-main">
-          ${constJourneyReadoutHtml(teams, all)}
+          ${constJourneySelectedReadoutHtml(all) || constJourneyReadoutHtml(teams, all)}
           <div class="alch-constellation-legend">${legend}</div>
           <div class="alch-constellation-stage alch-journey-stage">
             <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">
@@ -4638,6 +4750,7 @@ function renderJourney() {
     </div>
     </div>
   `;
+  markConstellationSelection(state.constSelection);
 }
 
 function renderProductStack() {
@@ -4659,13 +4772,15 @@ function renderProductStack() {
   const legend = CONST_DOMAIN_KEYS
     .map(k => `<span class="acl-item"><span class="acl-dot acl-dot-${k}"></span>${escHtml(CONST_DOMAIN_LABEL[k])}</span>`)
     .join("");
+  const selectionChip = constSelectionChipHtml();
   state.canvas.innerHTML = `
     <div class="alch-cohort-page" data-cohort-view="stack">
     ${cohortPageHead("stack")}
+    ${selectionChip ? `<div class="alch-view-controls">${selectionChip}</div>` : ""}
     <div class="alch-constellation" data-constellation-view="stack">
       <div class="alch-const-workbench is-single">
         <div class="alch-const-main">
-          ${constStackReadoutHtml(inspectorCtx)}
+          ${constStackSelectedReadoutHtml(inspectorCtx) || constStackReadoutHtml(inspectorCtx)}
           <div class="alch-constellation-legend">${legend}</div>
           <div class="alch-constellation-stage ac-stack-stage" data-view="stack" data-lens="all" tabindex="0" aria-label="constellation product layer directory">
             ${constProductStackHtml(stackModel)}
@@ -4917,9 +5032,10 @@ function renderConstellationPeople(teams, people, clusters, edges) {
     <div class="acl-line-note">Circles are primary project groups. Lines are inferred from person profiles and should be treated as conversation leads.</div>`;
   state.canvas.innerHTML = `
     <div class="alch-cohort-page" data-cohort-view="map">
-      ${cohortPageHead("map")}
+      ${cohortPageHead("map", { dek: "How people connect — grouped by project, linked by shared work and overlapping context." })}
       <div class="alch-view-controls">
         ${constellationNetworkScopeRow("people", { projects: teams.length, people: people.length })}
+        ${constSelectionChipHtml()}
       </div>
       <div class="alch-constellation" data-constellation-view="map" data-constellation-scope="people">
         <div class="alch-const-workbench">
@@ -5151,7 +5267,6 @@ function setConstellationTimelineIdx(rawIdx) {
   if (state.mode === "constellation") {
     renderConstellation();
     wireConstellationHover();
-    if (state.constellationDrawerRecordId) openDrawer(state.constellationDrawerRecordId);
   }
 }
 
@@ -5450,6 +5565,7 @@ function renderConstellation() {
         ${viewMode === "map" ? `
           ${constellationLensRow(lens, { edges: coverage.edges, meaningMissing: coverage.meaningMissing, ...relationshipBreakdown })}
         ` : ""}
+        ${constSelectionChipHtml()}
       </div>` : ""}
     <div class="alch-constellation" data-constellation-view="${escAttr(viewMode)}">
       <div class="alch-const-workbench">
@@ -5772,21 +5888,58 @@ function wireShapeCardClicks() {
   wireExternalLinks(state.canvas);
 }
 
-function openDetail(recordId) {
+function normalizeDetailReturnMode(mode) {
+  if (mode === "collab") return "constellation";
+  if (mode === "pulse") return "shapes";
+  if (mode === "intel") return "context";
+  return ALCHEMY_MODES.includes(mode) ? mode : "shapes";
+}
+
+function clearDetailForNavigation() {
+  state.detailRecordId = null;
+  state.detailReturnMode = null;
+  try { localStorage.removeItem(DETAIL_LS_KEY); } catch {}
+}
+
+function openDetail(recordId, returnMode = state.mode || "shapes") {
   if (!recordId) return;
+  const mode = normalizeDetailReturnMode(returnMode);
+  state.mode = mode;
   state.detailRecordId = String(recordId);
-  // Remember where to land on back — usually shapes, but if user opened
-  // the detail from a different mode (future entry points) honor that.
-  state.detailReturnMode = state.mode || "shapes";
+  // Remember where to land on back. Constellation sub-views keep their
+  // own state in state.constellationMode, so restoring "constellation"
+  // returns to map/journey/stack/collab rather than the generic cohort grid.
+  state.detailReturnMode = mode;
   try {
+    localStorage.setItem(ALCHEMY_LS_KEY, mode);
     localStorage.setItem(DETAIL_LS_KEY, JSON.stringify({
       recordId: state.detailRecordId,
       returnMode: state.detailReturnMode,
     }));
   } catch {}
-  render();
-  // Scroll the canvas to the top so the hero is in view.
-  try { state.canvas?.scrollTo({ top: 0, behavior: "auto" }); } catch {}
+  const update = () => {
+    render();
+    // Scroll the canvas to the top so the hero is in view.
+    try { state.canvas?.scrollTo({ top: 0, behavior: "auto" }); } catch {}
+  };
+  // Sigil continuity: tag the clicked card's canvas so the same-document
+  // view transition morphs it into the dossier hero (the rail canvas
+  // carries the matching view-transition-name statically in styles.css).
+  // Forward direction only — back to the grid stays instant.
+  let cardCanvas = null;
+  try {
+    cardCanvas = state.canvas?.querySelector(
+      `.alch-card[data-record-id="${CSS.escape(state.detailRecordId)}"] canvas`
+    ) || null;
+  } catch {}
+  const reduceMotion = typeof matchMedia === "function"
+    && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (cardCanvas && !reduceMotion && typeof document.startViewTransition === "function") {
+    cardCanvas.style.viewTransitionName = "sr-sigil";
+    document.startViewTransition(update);
+  } else {
+    update();
+  }
 }
 
 function closeDetail() {
@@ -5803,6 +5956,27 @@ function closeDetail() {
 function wireConstellationHover() {
   wireConstellationModeNav();
   const stage = state.canvas.querySelector(".alch-constellation-stage");
+  // Selection chip + readout name-links live OUTSIDE the inspector (which
+  // has its own delegated handler), so the canvas owns them. Bound once —
+  // state.canvas survives innerHTML swaps, so per-render binds would pile up.
+  if (!state.constellationCanvasActionsBound) {
+    state.constellationCanvasActionsBound = true;
+    state.canvas.addEventListener("click", (e) => {
+      if (state.mode !== "constellation" || state.detailRecordId) return;
+      if (e.target.closest(".ac-inspector")) return;
+      const clearTarget = e.target.closest("[data-const-clear-selection]");
+      if (clearTarget) {
+        state.constSelection = null;
+        render();
+        return;
+      }
+      const openTarget = e.target.closest("[data-const-open-record]");
+      if (openTarget) {
+        const rid = openTarget.getAttribute("data-const-open-record");
+        if (rid) openDetail(rid);
+      }
+    });
+  }
   if (!state.constellationEscapeBound) {
     state.constellationEscapeBound = true;
     document.addEventListener("keydown", (e) => {
@@ -5864,6 +6038,24 @@ function wireConstellationHover() {
     };
     // Cluster wells are the ecosystem control. Clicking the visual circle now
     // changes the graph read; the old text-chip row was redundant.
+    // Two-click grammar, shared by every entity mark on every cohort view:
+    // first click selects (the view's sidebar/readout answers in this
+    // view's terms); clicking the SAME entity again commits to its full
+    // record page. Views without a live inspector panel (journey, stack)
+    // re-render so their readout picks the selection up.
+    const selectOrOpen = (type, rid) => {
+      if (!rid) return;
+      if (state.constSelection?.type === type && state.constSelection.rid === rid) {
+        openDetail(rid);
+        return;
+      }
+      if (state.canvas?.querySelector(".ac-inspector")) {
+        setConstellationInspector({ type, rid }, inspectorCtx);
+      } else {
+        state.constSelection = { type, rid };
+        render();
+      }
+    };
     for (const well of stage.querySelectorAll(".ac-well[data-well]")) {
       const wellId = well.getAttribute("data-well") || "all";
       const showWellTip = (e) => {
@@ -5912,7 +6104,7 @@ function wireConstellationHover() {
       });
       g.addEventListener("click", (e) => {
         e.preventDefault();
-        setConstellationInspector({ type: "team", rid }, inspectorCtx);
+        selectOrOpen("team", rid);
       });
       g.addEventListener("focus", () => {
         setConstellationHover(stage, rid, true);
@@ -5921,7 +6113,7 @@ function wireConstellationHover() {
       g.addEventListener("keydown", (e) => {
         if (e.key !== "Enter" && e.key !== " ") return;
         e.preventDefault();
-        setConstellationInspector({ type: "team", rid }, inspectorCtx);
+        selectOrOpen("team", rid);
       });
     }
     for (const item of stage.querySelectorAll(".ac-stack-team[data-const-team]")) {
@@ -5950,7 +6142,7 @@ function wireConstellationHover() {
       item.addEventListener("mouseleave", () => { if (tip) tip.hidden = true; });
       item.addEventListener("click", (e) => {
         e.preventDefault();
-        if (rid) openDrawer(rid);
+        selectOrOpen("team", rid);
       });
       item.addEventListener("focus", () => {
         const t = teamById.get(rid);
@@ -5969,7 +6161,7 @@ function wireConstellationHover() {
       item.addEventListener("keydown", (e) => {
         if (e.key !== "Enter" && e.key !== " ") return;
         e.preventDefault();
-        if (rid) openDrawer(rid);
+        selectOrOpen("team", rid);
       });
     }
     // Dependency paths: hover identifies the line; click pins the full evidence
@@ -6021,7 +6213,7 @@ function wireConstellationHover() {
       node.addEventListener("mouseleave", () => { if (tip) tip.hidden = true; });
       node.addEventListener("click", (e) => {
         e.preventDefault();
-        if (rid) openDrawer(rid);
+        selectOrOpen("team", rid);
       });
       node.addEventListener("focus", () => {
         showJourneyTip(stage, tip, teamById.get(rid));
@@ -6030,7 +6222,7 @@ function wireConstellationHover() {
       node.addEventListener("keydown", (e) => {
         if (e.key !== "Enter" && e.key !== " ") return;
         e.preventDefault();
-        if (rid) openDrawer(rid);
+        selectOrOpen("team", rid);
       });
     }
     for (const node of stage.querySelectorAll(".ac-person-node[data-person-id]")) {
@@ -6051,7 +6243,7 @@ function wireConstellationHover() {
       });
       node.addEventListener("click", (e) => {
         e.preventDefault();
-        if (rid) setConstellationInspector({ type: "person", rid }, inspectorCtx);
+        selectOrOpen("person", rid);
       });
       node.addEventListener("focus", () => {
         setConstellationPersonHover(stage, rid, true);
@@ -6067,7 +6259,7 @@ function wireConstellationHover() {
       node.addEventListener("keydown", (e) => {
         if (e.key !== "Enter" && e.key !== " ") return;
         e.preventDefault();
-        if (rid) setConstellationInspector({ type: "person", rid }, inspectorCtx);
+        selectOrOpen("person", rid);
       });
     }
     for (const anchor of stage.querySelectorAll(".ac-project-anchor[data-const-team]")) {
@@ -6089,7 +6281,7 @@ function wireConstellationHover() {
       });
       anchor.addEventListener("click", (e) => {
         e.preventDefault();
-        if (rid) setConstellationInspector({ type: "team", rid }, inspectorCtx);
+        selectOrOpen("team", rid);
       });
       anchor.addEventListener("focus", () => setConstellationPersonProjectHover(stage, rid, true));
       anchor.addEventListener("blur", () => setConstellationPersonProjectHover(stage, rid, false));
@@ -6118,14 +6310,14 @@ function wireConstellationHover() {
       });
       group.addEventListener("click", (e) => {
         e.preventDefault();
-        if (rid) setConstellationInspector({ type: "team", rid }, inspectorCtx);
+        selectOrOpen("team", rid);
       });
       group.addEventListener("focus", () => setConstellationPersonProjectHover(stage, rid, true));
       group.addEventListener("blur", () => setConstellationPersonProjectHover(stage, rid, false));
       group.addEventListener("keydown", (e) => {
         if (e.key !== "Enter" && e.key !== " ") return;
         e.preventDefault();
-        if (rid) setConstellationInspector({ type: "team", rid }, inspectorCtx);
+        selectOrOpen("team", rid);
       });
     }
   }
@@ -6219,9 +6411,11 @@ function wireConstellationHover() {
       }
       const openTarget = e.target.closest("[data-const-open-record]");
       if (openTarget) {
+        // Person or team, the destination is the same: the full record
+        // page. (The legacy summary drawer is retired — the dossier now
+        // carries everything it showed.)
         const rid = openTarget.getAttribute("data-const-open-record");
-        if (rid && constellationCurrentInspectorContext().personById?.has(rid)) openDetail(rid);
-        else if (rid) openDrawer(rid);
+        if (rid) openDetail(rid, "constellation");
         return;
       }
       const personTarget = e.target.closest("[data-const-person]");
@@ -6266,6 +6460,14 @@ function setConstellationInspector(selection, ctx) {
   if (body) body.innerHTML = constellationInspectorLeadHtml(ctx, state.constSelection) + constellationInspectorHtml(state.constSelection, ctx);
   if (head) wireExternalLinks(head);
   if (body) wireExternalLinks(body);
+  // Keep the controls-row selection chip in sync without a full re-render
+  // (it's the cross-view cue + the discoverable clear).
+  const controls = state.canvas?.querySelector(".alch-view-controls");
+  if (controls) {
+    controls.querySelector(".ac-selection-chip")?.remove();
+    const chipHtml = constSelectionChipHtml();
+    if (chipHtml) controls.insertAdjacentHTML("beforeend", chipHtml);
+  }
   markConstellationSelection(state.constSelection);
 }
 
@@ -6406,6 +6608,15 @@ function markConstellationSelection(selection) {
       node.classList.add(cls);
       if (coreIds.has(recordId)) node.classList.add("is-selected");
     });
+  }
+  // A selection the current view can't show must not dim the view: when no
+  // mark classified as core (the selected record is filtered out, lives in
+  // the other scope, or this view doesn't plot it), dimming everything
+  // reads as a broken page. Drop the dim; the selection chip in the view
+  // controls stays as the cross-view cue.
+  if (stage && !root.querySelector(".is-selection-core")) {
+    stage.removeAttribute("data-selection-active");
+    root.querySelectorAll(".is-selection-outside").forEach(el => el.classList.remove("is-selection-outside"));
   }
 }
 
@@ -6638,29 +6849,15 @@ function fmtShortDate(d) {
 // personColors and hsl stay here because the dossier exporter
 // (drawShapeGlyph) uses them too.
 
-// ─── calendar — sub-tabbed live view ─────────────────────────────────
-// Two sub-views, switchable via state.calendar.sub:
-//   week      broadsheet weekly grid (live Phala schedule, bundled fallback)
-//   presence  the existing availability Gantt (everyone's window + absences)
-//
-// Two sub-views: the broadsheet "week" grid (live Phala schedule, bundled
-// fallback) and "presence" (the existing availability gantt). Anchor events
-// from cohort-data/events/*.md fold into the week cells they fall on — no
-// separate "key dates" tab.
-function calendarSubView() {
-  const cal = state.calendar;
-  // Default sub is "day" — the calendar tab opens to a typeset agenda for
-  // today rather than the broadsheet week grid, since that's the question
-  // people most often have ("what's on right now?"). Week + presence are
-  // one click away from any tab.
-  return cal.sub === "presence" ? "presence"
-       : cal.sub === "week"     ? "week"
-       : "day";
-}
+// ─── calendar — one-view timeline ─────────────────────────────────────
+// Days as columns left→right, vertical hour axis, time-positioned event
+// blocks (renderer lives in calendar.js), with presence (availability
+// gantt) as a second tab. Graduated from its "calendar2" trial 2026-06;
+// the legacy day/week/presence page (cohort-calendar-week.js renderWeekView)
+// was retired with it.
 
 function seedCalendarData() {
   const cal = state.calendar;
-  if (cal.weekIdx == null) cal.weekIdx = calendarCurrentWeekIdx();
   if (cal.data != null || cal.loading) return;
 
   // Seed the data on first entry: prefer the bundled snapshot so the first
@@ -6680,66 +6877,27 @@ function seedCalendarData() {
   }).catch(() => { cal.loading = false; });
 }
 
-function renderCalendarHtml() {
+function paintCalendarView({ wire = false } = {}) {
+  seedCalendarData();
   const cal = state.calendar;
-  const sub = calendarSubView();
-  const presenceHtml = sub === "presence" ? renderCalAvailability() : "";
-
-  return renderCalendarWeekView({
+  if (cal.weekIdx == null) cal.weekIdx = calendarCurrentWeekIdx();
+  // Tear down the previous now-line ticker before swapping markup so
+  // intervals don't stack across repaints.
+  if (cal.detach) { cal.detach(); cal.detach = null; }
+  const presence = cal.view === "presence";
+  state.canvas.innerHTML = renderCalendarPage({
     data: cal.data,
     weekIdx: cal.weekIdx,
-    dayIdx:  cal.dayIdx == null ? null : cal.dayIdx,
-    sub,
     source: cal.source,
-    // Phala calendar.json is the single source of truth for the schedule.
-    // The cohort-data/events/*.md anchors duplicate entries already in the
-    // calendar cell text (e.g. daily-tea.md + "14:00–14:30 tea on roof"
-    // cells → tea showing twice on every weekday). Drop the anchor overlay
-    // for now; restore once dedupe + a recurrence model are in place.
-    events: [],
-    transcriptMatches: CALENDAR_TRANSCRIPT_MATCHES,
-    presenceHtml,
+    view: cal.view,
+    presenceHtml: presence ? renderCalAvailability() : "",
   });
-}
-
-function unmountCalendarBehavior() {
-  const cal = state.calendar;
-  if (cal.detachMobile) {
-    cal.detachMobile();
-    cal.detachMobile = null;
-  }
-}
-
-function mountCalendarBehavior({ scrollToToday = false } = {}) {
-  const cal = state.calendar;
-  const sub = calendarSubView();
-  if (sub === "presence") {
+  if (presence) {
     mountAvailabilityCanvas();
-    return;
+  } else {
+    cal.detach = attachCalendarPageBehavior(state.canvas, { scrollToNow: cal.initialMount });
+    cal.initialMount = false;
   }
-
-  // Wire mobile behavior on the week/day views: swipe-to-navigate + optional
-  // first-mount auto-scroll to today. Later partial refreshes should not jump
-  // the page back to today.
-  cal.detachMobile = attachCalendarMobileBehavior(state.canvas, {
-    scrollToToday,
-    onWeekChange: (delta) => {
-      const next = cal.weekIdx + delta;
-      if (next < 0 || next > 9) return;
-      cal.weekIdx = next;
-      refreshCalendarView();
-    },
-  });
-  cal.initialMount = false;
-}
-
-function paintCalendarView({ wire = false, scrollToToday = false } = {}) {
-  seedCalendarData();
-  // Tear down previous mobile-behavior listeners before swapping markup, or
-  // touchstart/touchend handlers will stack up across renders.
-  unmountCalendarBehavior();
-  state.canvas.innerHTML = renderCalendarHtml();
-  mountCalendarBehavior({ scrollToToday });
   if (wire) wireCalendar();
 }
 
@@ -6748,11 +6906,89 @@ function refreshCalendarView() {
     render();
     return;
   }
-  paintCalendarView({ wire: true, scrollToToday: false });
+  paintCalendarView({ wire: true });
+  // Live calendar data just painted in while the user is on the page —
+  // that counts as seen (mirrors the what's-new stamp in render()).
+  if (state.active && !document.hidden) {
+    markFingerprintsSeen("calendar-grid", calendarFingerprints());
+    updateRailUnread();
+  }
 }
 
 function renderCalendar() {
-  paintCalendarView({ wire: false, scrollToToday: state.calendar.initialMount });
+  paintCalendarView({ wire: false });
+}
+
+// Wire interactions: view tabs, week nav + scrubber, retry, the presence
+// extras, and the event-detail modal (delegated to calendar.js's model
+// registry).
+function wireCalendar() {
+  const cal = state.calendar;
+
+  // calendar / presence view tabs (shared .alch-page-views nav)
+  for (const tab of state.canvas.querySelectorAll("[data-c2-view]")) {
+    tab.addEventListener("click", () => {
+      const next = tab.dataset.c2View;
+      if (!next || next === cal.view) return;
+      cal.view = next;
+      refreshCalendarView();
+    });
+  }
+
+  // presence-view extras — gantt export + the "edit my availability" jump.
+  if (cal.view === "presence") {
+    const pngBtn = state.canvas.querySelector("#cal-export-png");
+    if (pngBtn) pngBtn.addEventListener("click", () => exportCalendar("png"));
+    const pdfBtn = state.canvas.querySelector("#cal-export-pdf");
+    if (pdfBtn) pdfBtn.addEventListener("click", () => exportCalendar("pdf"));
+    const editAvail = state.canvas.querySelector(".cal-avail-edit[data-cal-go-profile]");
+    if (editAvail) editAvail.addEventListener("click", () => {
+      state.mode = "profile";
+      try { localStorage.setItem(ALCHEMY_LS_KEY, "profile"); } catch {}
+      syncRailSelection();
+      render();
+    });
+  }
+
+  for (const btn of state.canvas.querySelectorAll("[data-c2-nav]")) {
+    btn.addEventListener("click", () => {
+      const dir = btn.dataset.c2Nav;
+      if (dir === "prev" && cal.weekIdx > 0) cal.weekIdx -= 1;
+      else if (dir === "next" && cal.weekIdx < WEEKS_TOTAL - 1) cal.weekIdx += 1;
+      else return;
+      refreshCalendarView();
+    });
+  }
+
+  for (const dot of state.canvas.querySelectorAll(".c2-scrub-dot[data-c2-week]")) {
+    dot.addEventListener("click", () => {
+      const i = Number(dot.dataset.c2Week);
+      if (Number.isFinite(i) && i !== cal.weekIdx) {
+        cal.weekIdx = i;
+        refreshCalendarView();
+      }
+    });
+  }
+
+  for (const card of state.canvas.querySelectorAll("[data-c2-ev]")) {
+    card.addEventListener("click", () => openCalendarEvent(card.dataset.c2Ev));
+  }
+
+  for (const btn of state.canvas.querySelectorAll("[data-c2-retry]")) {
+    btn.addEventListener("click", () => {
+      cal.loading = true;
+      const bundled = state.cohort?.calendar || null;
+      loadCalendarData({ bundled }).then(res => {
+        cal.data = res.data || cal.data;
+        cal.source = res.source || cal.source;
+        cal.loading = false;
+        if (state.mode === "calendar") refreshCalendarView();
+      }).catch(() => { cal.loading = false; });
+    });
+  }
+
+  // External links (source footer).
+  wireExternalLinks(state.canvas);
 }
 
 // ── presence view (the existing availability Gantt) ─────────────────
@@ -6767,15 +7003,14 @@ function renderCalAvailability() {
   const w = CAL_LEFT_W + numDays * CAL_DAY_W + CAL_PAD_R;
   const h = CAL_HEADER_H + bodyH + CAL_FOOTER_H + CAL_PAD_B;
 
-  const numPeople = rows.filter(r => r.type === "person").length;
-  const numTeamGroups = rows.filter(r => r.type === "team").length;
-
   return `
     <div class="cal-avail-wrap">
       <header class="cal-avail-head">
         <div>
-          <h3 class="cal-section-title">availability</h3>
-          <span class="cal-section-sub">${escHtml(fmtShortDate(start))} → ${escHtml(fmtShortDate(end))} · ${numPeople} individuals · ${numTeamGroups} groups · striped = absence</span>
+          <div class="cal-avail-legend" aria-label="chart legend">
+            <span class="cav-key"><i class="cav-sw cav-sw-present" aria-hidden="true"></i>present</span>
+            <span class="cav-key"><i class="cav-sw cav-sw-absent" aria-hidden="true"></i>absence</span>
+          </div>
         </div>
         <div class="cal-page-actions">
           <button id="cal-export-png" class="cal-action" type="button">export png</button>
@@ -6787,7 +7022,17 @@ function renderCalAvailability() {
       </header>
       <div class="cal-section cal-section-presence">
         <div class="cal-scroll">
-          <canvas id="cal-canvas" width="${w}" height="${h}" style="width:${w}px; height:${h}px;" data-cal-w="${w}" data-cal-h="${h}" data-cal-numdays="${numDays}"></canvas>
+          <!-- Freeze panes: sticky copies of the main canvas's edge regions
+               (names column / date header), pinned by the compositor — no
+               JS on the scroll path. The negative bottom margins collapse
+               each sticky strip's flow space so the main canvas still
+               starts at (0,0). See mountGanttFreezePanes. -->
+          <div class="cal-gantt-wrap" style="width:${w}px; height:${h}px;">
+            <canvas id="cal-canvas-corner" class="cal-gantt-corner" aria-hidden="true" style="margin-bottom:-${CAL_HEADER_H}px;"></canvas>
+            <canvas id="cal-canvas-top" class="cal-gantt-top" aria-hidden="true" style="margin-bottom:-${CAL_HEADER_H}px;"></canvas>
+            <canvas id="cal-canvas-left" class="cal-gantt-left" aria-hidden="true" style="margin-bottom:-${h}px;"></canvas>
+            <canvas id="cal-canvas" width="${w}" height="${h}" style="width:${w}px; height:${h}px;" data-cal-w="${w}" data-cal-h="${h}" data-cal-numdays="${numDays}"></canvas>
+          </div>
         </div>
       </div>
     </div>
@@ -6813,6 +7058,48 @@ function mountAvailabilityCanvas() {
   const ctx = cnv.getContext("2d");
   ctx.scale(dpr, dpr);
   drawCalendar(ctx, w, h, rows, start, end, numDays);
+  mountGanttFreezePanes(cnv, w, h, dpr);
+}
+
+// Freeze panes for the gantt. The whole chart is one canvas, so CSS sticky
+// can't pin parts of it directly — instead the name column (left), the
+// date header (top), and their corner are pixel-copies of the main
+// canvas's edge regions on their own sticky canvases. The compositor pins
+// them (flicker-free; no JS on the scroll path); the only scroll listener
+// just toggles the cosmetic edge shadows. Copies are veiled slightly
+// toward the page background so the frozen panes read quieter than the
+// live grid moving beneath them.
+function mountGanttFreezePanes(mainCnv, w, h, dpr) {
+  const scroller = mainCnv.closest(".cal-scroll");
+  const wrap      = mainCnv.closest(".cal-gantt-wrap");
+  const leftCnv   = document.getElementById("cal-canvas-left");
+  const topCnv    = document.getElementById("cal-canvas-top");
+  const cornerCnv = document.getElementById("cal-canvas-corner");
+  if (!scroller || !wrap || !leftCnv || !topCnv || !cornerCnv) return;
+
+  const veil = (getComputedStyle(document.documentElement).getPropertyValue("--ed-bg-0") || "").trim() || "#0a0a0a";
+  const copyRegion = (cnv, cssW, cssH) => {
+    cnv.width  = Math.round(cssW * dpr);
+    cnv.height = Math.round(cssH * dpr);
+    cnv.style.width  = cssW + "px";
+    cnv.style.height = cssH + "px";
+    const c = cnv.getContext("2d");
+    c.drawImage(mainCnv, 0, 0, cnv.width, cnv.height, 0, 0, cnv.width, cnv.height);
+    c.globalAlpha = 0.22;
+    c.fillStyle = veil;
+    c.fillRect(0, 0, cnv.width, cnv.height);
+    c.globalAlpha = 1;
+  };
+  copyRegion(leftCnv, CAL_LEFT_W, h);
+  copyRegion(topCnv, w, CAL_HEADER_H);
+  copyRegion(cornerCnv, CAL_LEFT_W, CAL_HEADER_H);
+
+  const syncShadows = () => {
+    wrap.classList.toggle("is-scrolled-x", scroller.scrollLeft > 0);
+    wrap.classList.toggle("is-scrolled-y", scroller.scrollTop > 0);
+  };
+  scroller.addEventListener("scroll", syncShadows, { passive: true });
+  syncShadows();
 }
 
 // FNV-1a hash → two hues in [0,1) for a person, matching the shader's
@@ -6843,118 +7130,6 @@ function hsl(h, s, l, a) {
   const g = Math.round(f(8) * 255);
   const b = Math.round(f(4) * 255);
   return `rgba(${r},${g},${b},${a == null ? 1 : a})`;
-}
-
-// Wire interactions for the active calendar view: sub-tab switch, week nav
-// (prev/today/next + the 10-week scrubber dots), stale-banner retry, the
-// "edit my availability" jump in the presence view, and gantt export.
-function wireCalendar() {
-  const cal = state.calendar;
-
-  // day / week / presence sub-tab switch
-  for (const btn of state.canvas.querySelectorAll(".cal-subtab[data-cal-sub]")) {
-    btn.addEventListener("click", () => {
-      const next = btn.dataset.calSub;
-      if (!next || next === cal.sub) return;
-      cal.sub = next;
-      refreshCalendarView();
-    });
-  }
-
-  // day-view day pills — pick which day of the visible week to view
-  for (const pill of state.canvas.querySelectorAll(".cal-day-pill[data-cal-day-pick]")) {
-    pill.addEventListener("click", () => {
-      const i = Number(pill.dataset.calDayPick);
-      if (!Number.isFinite(i) || i < 0 || i > 6) return;
-      cal.dayIdx = i;
-      refreshCalendarView();
-    });
-  }
-
-  for (const btn of state.canvas.querySelectorAll("[data-cal-transcript-path]")) {
-    btn.addEventListener("click", (e) => {
-      e.preventDefault();
-      openCalendarTranscript(btn.dataset.calTranscriptPath);
-    });
-  }
-
-  // click an event card → full-detail popover
-  for (const card of state.canvas.querySelectorAll("[data-cal-event]")) {
-    const open = () => openCalendarEventDetail(card);
-    card.addEventListener("click", open);
-    card.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
-    });
-  }
-
-  // save-png: export the visible week as a mobile-optimized portrait PNG.
-  const weekPngBtn = state.canvas.querySelector("[data-cal-png]");
-  if (weekPngBtn) {
-    weekPngBtn.addEventListener("click", () => {
-      try { exportCalendarWeekPng({ data: cal.data, weekIdx: cal.weekIdx }); }
-      catch (e) { console.warn("[calendar] png export failed", e); }
-    });
-  }
-
-  // week navigation (prev / today / next). Changing the visible week
-  // resets the day-view selection so day view follows the user's
-  // attention rather than stranding them on, say, "wednesday of last week"
-  // when they jump forward.
-  for (const btn of state.canvas.querySelectorAll("[data-cal-nav]")) {
-    btn.addEventListener("click", () => {
-      const dir = btn.dataset.calNav;
-      if (dir === "prev"  && cal.weekIdx > 0)  cal.weekIdx -= 1;
-      else if (dir === "next"  && cal.weekIdx < 9) cal.weekIdx += 1;
-      else if (dir === "today") cal.weekIdx = calendarCurrentWeekIdx();
-      else return;
-      cal.dayIdx = null;
-      refreshCalendarView();
-    });
-  }
-
-  // 10-week scrubber dots — same dayIdx reset semantics as week nav.
-  for (const dot of state.canvas.querySelectorAll(".cal-scrub-dot[data-week]")) {
-    dot.addEventListener("click", () => {
-      const i = Number(dot.dataset.week);
-      if (Number.isFinite(i) && i !== cal.weekIdx) {
-        cal.weekIdx = i;
-        cal.dayIdx = null;
-        refreshCalendarView();
-      }
-    });
-  }
-
-  // stale-banner retry — force a fresh live fetch
-  for (const btn of state.canvas.querySelectorAll("[data-cal-retry]")) {
-    btn.addEventListener("click", () => {
-      cal.loading = true;
-      const bundled = state.cohort?.calendar || null;
-      loadCalendarData({ bundled }).then(res => {
-        cal.data = res.data || cal.data;
-        cal.source = res.source || cal.source;
-        cal.loading = false;
-        if (state.mode === "calendar") refreshCalendarView();
-      }).catch(() => { cal.loading = false; });
-    });
-  }
-
-  // presence view's "edit my availability" → profile editor.
-  const editAvail = state.canvas.querySelector(".cal-avail-edit[data-cal-go-profile]");
-  if (editAvail) editAvail.addEventListener("click", () => {
-    state.mode = "profile";
-    try { localStorage.setItem(ALCHEMY_LS_KEY, "profile"); } catch {}
-    syncRailSelection();
-    render();
-  });
-
-  // Gantt export (presence view only)
-  const pngBtn = document.getElementById("cal-export-png");
-  if (pngBtn) pngBtn.addEventListener("click", () => exportCalendar("png"));
-  const pdfBtn = document.getElementById("cal-export-pdf");
-  if (pdfBtn) pdfBtn.addEventListener("click", () => exportCalendar("pdf"));
-
-  // External links inside the calendar view (recurring + footer links).
-  wireExternalLinks(state.canvas);
 }
 
 // ─── onboarding ─────────────────────────────────────────────────────
@@ -7237,19 +7412,7 @@ function renderOnboarding() {
     `;
   }).join("");
 
-  const coreCount = stepDefs.filter(s => !s.bonus).length;
-  const bonusCount = stepDefs.filter(s => s.bonus).length;
-  const countLabel = bonusCount > 0
-    ? `${coreCount} core step${coreCount === 1 ? "" : "s"} + ${bonusCount} bonus`
-    : `${coreCount} step${coreCount === 1 ? "" : "s"}`;
   state.canvas.innerHTML = `
-    <div class="alch-page-intro">
-      <span>
-        ${me
-          ? `You're <strong>${escHtml(me.name || me.record_id)}</strong>. ${countLabel} to get fully wired into the cohort.`
-          : `${countLabel} to get fully wired into the cohort.`}
-      </span>
-    </div>
     <ol class="alch-onb-steps">${stepHtml}</ol>
     <p class="alch-callout"><strong>onboarding · v0.5</strong><br/>
     01 + 03 auto-complete (you're in the app, so the local agent + Electron app are running). 02 sets up the field-kit so your agent gets CLI superpowers — voxterm comes bundled. 04 routes your profile through the field-kit's <code>/shape-rotator-profile</code> skill (with the in-app editor as fallback). 05 opens the live matrix join flow; 06 opens the local interview app/status. the bonus rows are second-agent (hermes) and adding your bot to matrix — optional, do them later.</p>
@@ -7797,7 +7960,6 @@ function renderProgram() {
   const tabs = renderProgramTabs(pages, current);
 
   state.canvas.innerHTML = `
-    <div class="alch-page-intro">The handbook. edits open a PR on github — stewards merge → next build:cohort ships the change to the cohort.</div>
     <nav class="alch-prog-tabs" role="tablist" aria-label="program section">${tabs}</nav>
     ${renderProgramPage(current)}
   `;
@@ -7996,9 +8158,7 @@ function collabVisibleOrder(m, filter = "all", sort = "cluster") {
 }
 
 function collabPeopleForTeam(rid) {
-  return (state.cohort?.people || []).filter(p =>
-    p.team === rid || (Array.isArray(p.secondary_teams) && p.secondary_teams.includes(rid))
-  );
+  return cohortRosterForTeam(state.cohort?.people || [], rid);
 }
 
 function collabCurrentModel() {
@@ -8021,31 +8181,7 @@ function collabTeamLinksSectionHtml(team) {
 }
 
 function collabTeamLinkItems(team) {
-  const L = team?.links || {};
-  const links = [], seen = new Set();
-  const add = (label, href, display = label) => {
-    if (!href) return;
-    const key = `${label}:${href}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    links.push({ label, href, display });
-  };
-  const displayUrl = (v) => String(v || "").replace(/^https?:\/\//, "").replace(/\/$/, "");
-  if (L.github) add("github", normalizeLinkHref("github", L.github), String(L.github).replace(/^https?:\/\/github\.com\//, ""));
-  if (L.x) {
-    const handle = String(L.x).replace(/^@/, "").replace(/^https?:\/\/(www\.)?(x|twitter)\.com\//, "");
-    add("x", normalizeLinkHref("x", handle), `@${handle}`);
-  }
-  if (L.website) add("website", normalizeLinkHref("website", L.website), displayUrl(L.website));
-  if (L.repo) {
-    const repo = String(L.repo).trim();
-    const href = GH_REPO_RE.test(repo) ? `https://github.com/${repo}` : normalizeLinkHref("website", repo);
-    add("repo", href, displayUrl(repo).replace(/^github\.com\//, ""));
-  }
-  if (L.demo) add("demo", normalizeLinkHref("demo", L.demo), displayUrl(L.demo));
-  if (L.deck) add("deck", normalizeLinkHref("deck", L.deck), displayUrl(L.deck));
-  if (L.slides) add("slides", normalizeLinkHref("slides", L.slides), displayUrl(L.slides));
-  return links;
+  return compactCohortLinkItems(team);
 }
 
 function collabTeamMark(team, className = "cb-inspector-mark") {
@@ -8136,9 +8272,18 @@ function collabNetworkHtml(groups) {
   return html ? collabInspectorSection("routes", `<div class="cb-network-grid">${html}</div>`, "is-network") : "";
 }
 
-function collabTeamMetaInlineHtml(team, memberCount) {
+function collabTeamMetaInlineHtml(team, people = []) {
+  const roster = cohortRosterSummary({
+    kind: teamKind(team),
+    roster: people,
+    declaredCount: team?.members_count,
+    maxNames: 2,
+  });
+  const rosterValue = roster.hasNames && roster.count <= 2
+    ? roster.visible.map(person => person.name || person.record_id).join(" · ")
+    : roster.fallback;
   const rows = [
-    memberCount ? ["team", `${memberCount} ${memberCount === 1 ? "person" : "people"}`] : null,
+    roster.count ? [roster.label, rosterValue] : null,
     team.geo ? ["geo", team.geo] : null,
   ].filter(Boolean);
   if (!rows.length) return "";
@@ -8193,7 +8338,7 @@ function collabTeamInspectorHtml(rid, m = collabCurrentModel()) {
   const meta = row?.clusterLabel || domainLabel(team.domain) || "team";
 
   const people = collabPeopleForTeam(rid);
-  const memberCount = people.length || Number(team.members_count) || 0;
+  const showPeopleSection = people.length > 2 || people.some(person => person?.role);
 
   return `
     <div class="cb-team-detail">
@@ -8202,7 +8347,7 @@ function collabTeamInspectorHtml(rid, m = collabCurrentModel()) {
           <div class="cb-inspector-kicker">${escHtml(meta || "team")}</div>
           <h4 class="cb-inspector-title">${escHtml(team.name || rid)}</h4>
           ${team.focus ? `<p class="cb-inspector-copy">${escHtml(team.focus)}</p>` : ""}
-          ${collabTeamMetaInlineHtml(team, memberCount)}
+          ${collabTeamMetaInlineHtml(team, people)}
         </div>
       </div>
       ${collabTeamRouteRailHtml({ outbound, inbound, getsHelpFrom, givesHelpTo })}
@@ -8214,7 +8359,7 @@ function collabTeamInspectorHtml(rid, m = collabCurrentModel()) {
         getsHelpFrom.length ? { label: "gets help from", count: getsHelpFrom.length, body: collabRouteRows(getsHelpFrom.map(s => ({ team: collabTeamByRecordId(s.offerer, m), note: s.shared.slice(0, 2).join(" · ") || "declared offer match", badge: "offers" }))) } : null,
         givesHelpTo.length ? { label: "gives help to", count: givesHelpTo.length, body: collabRouteRows(givesHelpTo.map(s => ({ team: collabTeamByRecordId(s.seeker, m), note: s.shared.slice(0, 2).join(" · ") || "declared ask match", badge: "seeks" }))) } : null,
       ])}
-      ${collabInspectorSection("who to talk to", collabMembersHtml(rid), "is-members")}
+      ${showPeopleSection ? collabInspectorSection("who to talk to", collabMembersHtml(rid), "is-members") : ""}
       ${collabCredentialsHtml(team)}
       ${collabTeamLinksSectionHtml(team)}
     </div>
@@ -9465,10 +9610,13 @@ function wireCollab() {
       if (!rid) return;
       if (collabRoot) {
         const next = { type: "team", rid };
-        if (collabSameSelection(state.collabSelection, next)) clearCollabSelection();
+        // Same two-click grammar as the other cohort views: first click
+        // selects into the collab inspector, the second click on the same
+        // record commits to its full page. (Deselect via inspector/Escape.)
+        if (collabSameSelection(state.collabSelection, next)) openDetail(rid, "constellation");
         else setCollabSelection(next);
       } else {
-        openDrawer(rid);
+        openDetail(rid, "constellation");
       }
     };
     el.addEventListener("click", activate);
@@ -9643,7 +9791,6 @@ function renderAsks() {
   state.openAskComposer = false;
 
   state.canvas.innerHTML = `
-    <div class="alch-page-intro">Post an ask to the cohort — pair on something, get 30 min with someone, or borrow a brain. open asks stay visible until you close them.</div>
     <form class="alch-asks-compose" data-author-slug="${escAttr(authorSlug)}" data-today="${escAttr(todayIso)}" data-autofocus="${openComposer ? "1" : "0"}">
       <details class="alch-asks-compose-shell" data-asks-compose-details${openComposer ? " open" : ""}>
         <summary class="alch-asks-compose-head">
@@ -9977,9 +10124,6 @@ function wireAsks() {
 // can then promote selected, public-safe summaries into the existing
 // GitHub PR flow for asks or program notes.
 
-const CONTEXT_CONTENT_VERSION = "v0.0.3";
-const CONTEXT_CONTENT_RELEASE_NOTE = "reader drafts · transcripts · copy bundle · local-date calendar";
-
 function contextVaultAvailable() {
   return !!(window.api?.loadContextVault && window.api?.scanContextVault);
 }
@@ -10031,6 +10175,29 @@ function contextVaultFingerprints() {
   const m = state.contextVault?.manifest;
   if (!m) return [];
   return fingerprintItems([...(m.sources || []), ...(m.raw_scripts || [])]);
+}
+
+// What's-new channel for the calendar. The calendar page renders the
+// phala calendar grid (cal.data / surface.calendar) — NOT surface.events,
+// whose anchor overlay is dropped in renderCalendarHtml — so its unread
+// count must fingerprint the grid the user actually sees: one entry per
+// non-empty cell, keyed by tab + position. Stored under "calendar-grid"
+// (fresh key, so existing baselines from the old events-based channel
+// prime silently instead of flooding the badge).
+function calendarFingerprints() {
+  const data = state.calendar?.data || state.cohort?.calendar || null;
+  const tabs = data?.tabs;
+  if (!tabs || typeof tabs !== "object") return [];
+  const items = [];
+  for (const [tab, rows] of Object.entries(tabs)) {
+    (Array.isArray(rows) ? rows : []).forEach((row, ri) => {
+      (Array.isArray(row) ? row : []).forEach((cell, ci) => {
+        const text = String(cell ?? "").trim();
+        if (text) items.push({ id: `${tab}:r${ri}c${ci}`, text });
+      });
+    });
+  }
+  return fingerprintItems(items);
 }
 
 async function autoRefreshContextVault() {
@@ -10199,23 +10366,6 @@ function resolvePendingContextRawScript() {
     state.contextVault.pendingRawPath = null;
   }
   return source;
-}
-
-function openCalendarTranscript(pathValue) {
-  if (!pathValue) return;
-  state.contextVault.mode = "raw";
-  const source = contextRawScriptByPath(pathValue);
-  if (source) {
-    state.contextVault.selectedRawId = source.id;
-    state.contextVault.pendingRawPath = null;
-  } else {
-    state.contextVault.selectedRawId = null;
-    state.contextVault.pendingRawPath = pathValue;
-  }
-  state.mode = "context";
-  try { localStorage.setItem(ALCHEMY_LS_KEY, "context"); } catch {}
-  syncRailSelection();
-  render();
 }
 
 async function loadContextRawScriptText(sourceId) {
@@ -10684,14 +10834,9 @@ function renderContextVault() {
   // Intel views — the embedded signals/data module renders below the same
   // page header the vault views use.
   if (view === "signals" || view === "data") {
-    const side = `
-      <div class="alch-page-head-meta">
-        <span>snapshot ${escHtml(intelMeta.generated || "unknown")}</span>
-        <span>curated preview · cohort-facing</span>
-      </div>`;
     state.canvas.innerHTML = `
       <section class="alch-cv">
-        ${pageHeadHtml({ kicker: "local context vault", title: "context", dek: CONTEXT_VIEW_DEK[view], side, nav })}
+        ${pageHeadHtml({ kicker: "local context vault", title: "context", dek: CONTEXT_VIEW_DEK[view], nav })}
         <div class="alch-cv-intel"></div>
       </section>
     `;
@@ -10728,14 +10873,9 @@ function renderContextVault() {
     }).join("");
   const detail = mode === "raw" ? renderContextVaultRawDetail(selectedRaw) : renderContextVaultDetail(selected);
 
-  const vaultSide = `
-    <div class="alch-page-head-meta">
-      <span>content ${escHtml(CONTEXT_CONTENT_VERSION)}</span>
-      <span title="${escAttr(CONTEXT_CONTENT_RELEASE_NOTE)}">${escHtml(CONTEXT_CONTENT_RELEASE_NOTE)}</span>
-    </div>`;
   state.canvas.innerHTML = `
     <section class="alch-cv">
-      ${pageHeadHtml({ kicker: "local context vault", title: "context", dek: CONTEXT_VIEW_DEK[view], side: vaultSide, nav })}
+      ${pageHeadHtml({ kicker: "local context vault", title: "context", dek: CONTEXT_VIEW_DEK[view], nav })}
       ${cv.message ? `<p class="alch-cv-message">${escHtml(cv.message)}</p>` : ""}
       ${cv.error ? `<p class="alch-cv-error">${escHtml(cv.error)}</p>` : ""}
       <div class="alch-cv-layout">
@@ -11090,9 +11230,9 @@ async function exportDossier() {
     return String(a.name).localeCompare(String(b.name));
   });
 
-  // Group people by team id so each card can list members inline.
-  const peopleByTeam = new Map(cohortIndex.primaryPeopleByTeam);
-  // Sort each team's members: lead first, then alpha.
+  // Group primary and secondary contributors so each card owns the roster.
+  const peopleByTeam = new Map(cohortIndex.peopleByTeam);
+  // Sort each team's roster: lead first, then alpha.
   for (const arr of peopleByTeam.values()) {
     arr.sort((a, b) => {
       const al = a.role === "lead" ? 0 : 1;
@@ -11256,38 +11396,30 @@ function drawDossierCard(ctx, team, members, x, y, w, h) {
   }
   ctx.globalAlpha = 1;
 
-  // ── Meta strip (GEO · #CONTRIBUTORS) at bottom-left ───────────────
-  // Two columns (LEAD column was retired with the lead field). The full
-  // contributor list still renders below as the ROSTER row.
+  // ── Meta strip (GEO · roster) at bottom-left ──────────────────────
   const colGeoX        = x + 20;
   const colMembersX    = x + 220;
   const colGeoW        = (colMembersX - colGeoX) - 10;
   const colMembersW    = (x + w - 20) - colMembersX;
+  const roster = cohortRosterSummary({
+    kind: teamKind(team),
+    roster: members,
+    declaredCount: team.members_count,
+    maxNames: 4,
+  });
+  const rosterText = roster.hasNames
+    ? `${roster.visible.map(m => m.name || m.record_id).join("  ·  ")}${roster.overflow ? `  · +${roster.overflow}` : ""}`
+    : roster.fallback;
 
   ctx.font = `500 9.5px "JetBrains Mono", ui-monospace, monospace`;
   ctx.fillStyle = CAL_INK_1;
   ctx.globalAlpha = 0.42;
   ctx.fillText("GEO",          colGeoX,     y + h - 70);
-  ctx.fillText("CONTRIBUTORS", colMembersX, y + h - 70);
+  ctx.fillText(roster.label.toUpperCase(), colMembersX, y + h - 70);
   ctx.globalAlpha = 0.88;
   ctx.font = `500 12px "JetBrains Mono", ui-monospace, monospace`;
   ctx.fillText(truncateText(ctx, team.geo || "—", colGeoW), colGeoX, y + h - 52);
-  ctx.fillText(truncateText(ctx, String(members.length || team.members_count || 0), colMembersW), colMembersX, y + h - 52);
-
-  // ── Member chips ───────────────────────────────────────────────────
-  if (members.length) {
-    ctx.font = `400 10px "JetBrains Mono", ui-monospace, monospace`;
-    ctx.fillStyle = CAL_INK_1;
-    ctx.globalAlpha = 0.42;
-    ctx.fillText("ROSTER", x + 20, y + h - 28);
-    ctx.globalAlpha = 0.85;
-    ctx.font = `italic 12px "Iowan Old Style", Georgia, serif`;
-    const rosterX = x + 70;
-    const rosterW = (x + w - 20) - rosterX;
-    const names = members.slice(0, 5).map(m => m.name || m.record_id).join("  ·  ");
-    const suffix = members.length > 5 ? `  · +${members.length - 5}` : "";
-    ctx.fillText(truncateText(ctx, names + suffix, rosterW), rosterX, y + h - 28);
-  }
+  ctx.fillText(truncateText(ctx, rosterText, colMembersW), colMembersX, y + h - 52);
   ctx.globalAlpha = 1;
 }
 
@@ -11572,6 +11704,20 @@ function renderDisclosureSection(title, body, open = false, preview = "", extraC
   `;
 }
 
+// Flat section — same visual language as the disclosure (hairline + small
+// label) but the content is simply VISIBLE. The dossier reads top to
+// bottom like a document; only the long tail (timeline) stays collapsible.
+function renderFlatSection(title, body, extraClass = "") {
+  const cleaned = detailHtmlParts(body);
+  if (!cleaned.trim()) return "";
+  return `
+    <section class="alch-detail-section alch-detail-flat ${extraClass}">
+      <div class="alch-flat-label">${escHtml(title)}</div>
+      <div class="alch-section-body">${cleaned}</div>
+    </section>
+  `;
+}
+
 function detailQuickRow(label, items, extraClass = "") {
   const html = (items || []).filter(Boolean).join("");
   if (!html) return "";
@@ -11626,8 +11772,34 @@ function detailTeamToken(team) {
   `;
 }
 
+// Collapsed-section previews carry CONTENT, not schema: the summary line
+// should replace uncertainty ("what's in here?") with the actual signal.
+// Truncate to one readable clause; empty in → empty out so callers can
+// fall back to a schema hint when a record hasn't declared the field.
+function previewSnippet(value, max = 64) {
+  const first = Array.isArray(value)
+    ? value.find(v => v != null && String(v).trim())
+    : value;
+  const s = String(first || "").replace(/\s+/g, " ").trim();
+  if (!s) return "";
+  return s.length > max ? `${s.slice(0, max - 1).trimEnd()}…` : s;
+}
+
 function detailTimelinePreview(items = []) {
-  const labels = [...new Set((Array.isArray(items) ? items : [])
+  const rows = (Array.isArray(items) ? items : []).filter(Boolean);
+  // Lead with the most recent entry — "what happened last" is the signal;
+  // the old type-label list ("event, onboarding, profile") restated schema.
+  const dated = rows
+    .filter(item => item?.date)
+    .sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  const latest = dated[0] || rows[rows.length - 1];
+  if (latest) {
+    const title = previewSnippet(latest.title || detailTimelineType(latest.type), 48);
+    if (title) {
+      return latest.date ? `${detailTimelineDate(latest.date)} — ${title}` : title;
+    }
+  }
+  const labels = [...new Set(rows
     .map(item => detailLabelize(item?.type || item?.source || ""))
     .filter(Boolean))]
     .slice(0, 3);
@@ -11768,7 +11940,7 @@ function detailMemberRows(people, kind) {
     </span>
   `).join("");
   if (!rows) return "";
-  return `<div><span>${kind === "project" ? "contributors" : "members"}</span><span class="alch-rail-members">${rows}</span></div>`;
+  return `<div><span>${kind === "project" ? "contributors" : "team"}</span><span class="alch-rail-members">${rows}</span></div>`;
 }
 
 function renderPersonRail(person, team, fam) {
@@ -11782,7 +11954,7 @@ function renderPersonRail(person, team, fam) {
         ${person.role ? `<p class="alch-detail-focus">${escHtml(person.role)}</p>` : ""}
         <div class="alch-rail-list">
           <div><span>status</span>${escHtml(detailLabelize(person.role_class || "person"))}</div>
-          ${team ? `<div><span>team</span>${detailRecordToken(team)}</div>` : ""}
+          ${team ? `<div><span>team</span>${detailTeamToken(team)}</div>` : ""}
           ${person.geo ? `<div><span>geo</span>${escHtml(person.geo)}</div>` : ""}
           ${person.domain ? `<div><span>domain</span>${escHtml(domainLabel(person.domain))}</div>` : ""}
           ${dates ? `<div><span>window</span>${dates}</div>` : ""}
@@ -11864,22 +12036,21 @@ function renderTeamDetail(team) {
   const kind = teamKind(team);
   const fam = s ? s.fam : Math.abs(hashStr(recordId || "_")) % 6;
   const memberClusters = cohortIndex.clustersByTeam.get(recordId) || [];
-  const teamPeople = cohortIndex.primaryPeopleByTeam.get(recordId) || [];
+  const teamPeople = cohortIndex.peopleByTeam.get(recordId) || [];
   const editUrl = buildEditPRUrl({ recordType: "team", recordId });
   const links = team.links || {};
   const journey = detailJourneySummary(team);
+  // Stage / evidence / upside / bottleneck / next milestone live in the
+  // always-visible "trajectory" quick row — the section below adds the
+  // qualitative read (who for, what problem, what proof) instead of
+  // repeating the same pills as rows.
   const trajectoryRows = [
-    { key: "stage", value: escHtml(`${journey.stage} ${journey.stageLabel}`.trim()) },
-    { key: "evidence", value: escHtml(`${journey.evidence_quality}/5${journey.evidenceLabel ? ` ${journey.evidenceLabel}` : ""}`) },
-    { key: "upside", value: escHtml(`${journey.market_upside}/5${journey.upsideLabel ? ` ${journey.upsideLabel}` : ""}`) },
-    { key: "bottleneck", value: journey.primary_bottleneck ? escHtml(journey.primary_bottleneck) : "" },
     { key: "company type", value: journey.company_type ? escHtml(journey.company_type) : "" },
     { key: "confidence", value: journey.confidence ? escHtml(journey.confidence) : "" },
     { key: "icp", value: journey.icp ? escHtml(journey.icp) : "" },
     { key: "problem", value: journey.problem ? escHtml(journey.problem) : "" },
     { key: "solution", value: journey.solution ? escHtml(journey.solution) : "" },
     { key: "evidence notes", value: journey.evidence_notes ? escHtml(journey.evidence_notes) : "" },
-    { key: "next milestone", value: journey.next_milestone ? escHtml(journey.next_milestone) : "" },
     { key: "this week", value: detailList(team.weekly_goals) },
     { key: "milestones", value: detailList(team.monthly_milestones) },
     { key: "graduation", value: team.graduation_target ? escHtml(team.graduation_target) : "" },
@@ -11900,8 +12071,9 @@ function renderTeamDetail(team) {
   const nextMove = detailQuickRow("next move", [
     detailQuickText("", team.now || journey.next_milestone),
   ]);
-  const needs = detailQuickRow("needs", detailItems(team.seeking).slice(0, 2).map(value => detailQuickText("", value)));
-  const provides = detailQuickRow("provides", detailItems(team.offering).slice(0, 2).map(value => detailQuickText("", value)));
+  // (needs / provides quick rows retired — the flat "coordination" block
+  // below now shows the full seeking/offering lists in the same frame;
+  // truncated copies above them were duplicate owners.)
   const guild = detailQuickRow("guild", memberClusters.map(cl => detailQuickText("", cl.label || cl.name || cl.record_id)));
   const trajectory = detailQuickRow("trajectory", [
     detailPill("stage", `${journey.stage} ${journey.stageLabel}`),
@@ -11928,8 +12100,6 @@ function renderTeamDetail(team) {
       </button>
       <div class="alch-detail-bar-tag">
         <span>${escHtml(team.record_id.toUpperCase())}</span>
-        <span class="ct-sep">·</span>
-        <span class="ct-kind ct-kind-${escHtml(kind)}">${escHtml(kind)}</span>
         ${team.is_mentor ? `<span class="ct-sep">·</span><span>mentor</span>` : ""}
       </div>
       <a href="${escHtml(editUrl)}" data-external class="alch-detail-edit" title="edit this record on github">edit on github →</a>
@@ -11942,11 +12112,11 @@ function renderTeamDetail(team) {
         <div class="alch-ledger-head">
           <span class="alch-detail-h">${escHtml(kind)} read</span>
         </div>
-        <div class="alch-detail-quick alch-team-quick">${nextMove}${needs}${provides}${guild}${trajectory}${explore}</div>
+        <div class="alch-detail-quick alch-team-quick">${nextMove}${guild}${trajectory}${explore}</div>
         <div class="alch-section-stack">
-          ${renderDisclosureSection("trajectory", detailRows(trajectoryRows), false, "stage, proof, next test")}
-          ${renderDisclosureSection("evidence", detailRows(evidenceRows), false, "traction, paper, shipping")}
-          ${renderDisclosureSection("coordination", detailRows(coordinationRows), false, "dependencies, seeks, offers")}
+          ${renderFlatSection("positioning", detailRows(trajectoryRows))}
+          ${renderFlatSection("evidence", detailRows(evidenceRows))}
+          ${renderFlatSection("coordination", detailRows(coordinationRows))}
           ${renderRecordTimeline("team", recordId)}
         </div>
       </section>
@@ -11990,7 +12160,7 @@ function renderPersonDetail(person) {
   const links = person.links || {};
   const timelineItems = detailTimelineItems("person", recordId);
   const absences = Array.isArray(person.absences) ? person.absences : [];
-  const bioSection = renderDisclosureSection("about / bio", detailProse(person.bio_md), true, "profile context", "alch-detail-priority");
+  const bioSection = renderFlatSection("about / bio", detailProse(person.bio_md), "alch-detail-priority");
   const explore = detailQuickRow("explore", [
     detailQuickLink("GitHub", detailLinkForKey(links, "github")),
     detailQuickLink("X", detailLinkForKey(links, "x")),
@@ -12006,10 +12176,8 @@ function renderPersonDetail(person) {
     "themes",
     detailItems(person.recurring_themes).slice(0, 4).map(value => detailQuickText("", value))
   );
-  const teamContext = team ? detailQuickRow("team context", [
-    detailTeamToken(team),
-    detailQuickText("focus", team.focus),
-  ]) : "";
+  // (No "team context" quick row — the rail's team token owns that fact;
+  // the team's own focus lives one click away on its dossier.)
   const currentRows = [
     { key: "now", value: person.now ? `<span class="alch-detail-now">${escHtml(person.now)}</span>` : "" },
     { key: "weekly intention", value: person.weekly_intention ? escHtml(person.weekly_intention) : "" },
@@ -12044,10 +12212,6 @@ function renderPersonDetail(person) {
       </button>
       <div class="alch-detail-bar-tag">
         <span>${escHtml(recordId.toUpperCase())}</span>
-        <span class="ct-sep">·</span>
-        <span class="ct-kind ct-kind-person">individual</span>
-        <span class="ct-sep">·</span>
-        <span>${escHtml(domainLabel(person.domain))}</span>
       </div>
       <a href="${escHtml(editUrl)}" data-external class="alch-detail-edit" title="edit this record on github">edit on github →</a>
     </header>
@@ -12060,13 +12224,13 @@ function renderPersonDetail(person) {
           <span class="alch-detail-h">individual read</span>
         </div>
         ${bioSection ? `<div class="alch-section-stack alch-priority-stack">${bioSection}</div>` : ""}
-        <div class="alch-detail-quick">${explore}${askMeAbout}${themes}${teamContext}</div>
+        <div class="alch-detail-quick">${explore}${askMeAbout}${themes}</div>
         <div class="alch-section-stack">
-          ${renderDisclosureSection("current read", detailRows(currentRows), !bioSection, "now, weekly intention")}
-          ${renderDisclosureSection("working with", detailRows(workingRows), false, "style, availability, seeks")}
-          ${renderDisclosureSection("proof / prior work", renderPersonProofRead(person), false, "shipping, lineage")}
+          ${renderFlatSection("current read", detailRows(currentRows))}
+          ${renderFlatSection("working with", detailRows(workingRows))}
+          ${renderFlatSection("proof / prior work", renderPersonProofRead(person))}
+          ${renderFlatSection("routes / asks", detailRows(routeRows))}
           ${renderRecordTimeline("person", recordId)}
-          ${renderDisclosureSection("routes / asks", detailRows(routeRows), false, "other teams, logistics")}
         </div>
       </section>
     </article>
@@ -12098,233 +12262,11 @@ function wirePersonLinks(root) {
 }
 
 function renderDetailLinks(L) {
-  const LINK_LABELS = {
-    website: "website", demo: "demo", deck: "deck", repo: "repo",
-    article: "article", slides: "slides", alt: "alt site",
-    linkedin: "linkedin",
-  };
-  const rows = [];
-  if (L.repo && GH_REPO_RE.test(String(L.repo))) {
-    rows.push(`<div class="alch-detail-row"><span class="adr-k">repo</span><span class="adr-v"><a href="https://github.com/${escHtml(L.repo)}" data-external class="alch-card-repo-link">${escHtml(L.repo)}</a></span></div>`);
-  }
-  if (L.github) {
-    const gh = String(L.github);
-    const url = normalizeLinkHref("github", gh);
-    rows.push(`<div class="alch-detail-row"><span class="adr-k">github</span><span class="adr-v"><a href="${escAttr(url)}" data-external>${escHtml(gh)}</a></span></div>`);
-  }
-  if (L.x) {
-    const handle = String(L.x).replace(/^@/, "");
-    rows.push(`<div class="alch-detail-row"><span class="adr-k">x</span><span class="adr-v"><a href="${escAttr(normalizeLinkHref("x", handle))}" data-external>@${escHtml(handle)}</a></span></div>`);
-  }
-  for (const k of Object.keys(L)) {
-    if (k === "github" || k === "x" || k === "repo") continue;
-    const v = L[k];
-    if (!v) continue;
-    const label = LINK_LABELS[k] || k;
-    const display = (typeof v === "string") ? v.replace(/^https?:\/\//, "") : String(v);
-    const href = normalizeLinkHref(k, v);
-    if (href) {
-      rows.push(`<div class="alch-detail-row"><span class="adr-k">${escHtml(label)}</span><span class="adr-v"><a href="${escAttr(href)}" data-external>${escHtml(display)}</a></span></div>`);
-    } else {
-      rows.push(`<div class="alch-detail-row"><span class="adr-k">${escHtml(label)}</span><span class="adr-v">${escHtml(display)}</span></div>`);
-    }
-  }
-  if (rows.length === 0) rows.push(`<div class="alch-detail-row"><span class="adr-k">links</span><span class="adr-v" style="opacity:0.55">— not yet submitted</span></div>`);
-  return rows.join("");
-}
-
-// ─── drawer (specimen detail) ────────────────────────────────────────
-function openDrawer(recordId) {
-  if (!state.cohort) return;
-  const cohort = state.mode === "constellation" ? activeConstellationCohort() : state.cohort;
-  const cohortIndex = buildCohortIndex(cohort);
-  const team = cohortIndex.teamById.get(recordId);
-  if (!team) {
-    if (state.mode === "constellation") closeDrawer();
-    return;
-  }
-  if (state.mode === "constellation") state.constellationDrawerRecordId = String(recordId);
-
-  const { backdrop, drawer, body } = ensureDrawer();
-  const s = shapeForTeam(team);
-  const dest = s ? SHAPE_BY_KEY[s.rotates_to] : null;
-  const m = Number(team.members_count) || 0;
-
-  // Find which clusters this team belongs to
-  const memberClusters = cohortIndex.clustersByTeam.get(recordId) || [];
-
-  // Render every available link key with a sensible label; github + x
-  // get full URL prefixes, the rest are passed through.
-  const LINK_LABELS = {
-    website: "website", demo: "demo", deck: "deck", repo: "repo",
-    article: "article", slides: "slides", alt: "alt site",
-  };
-  const linksRow = (() => {
-    const rows = [];
-    const L = team.links || {};
-    if (L.github) {
-      // Treat as github user/org if no slash; as path otherwise.
-      const gh = String(L.github);
-      const url = gh.startsWith("http") ? gh : `https://github.com/${gh}`;
-      rows.push(`<div class="alch-drawer-row"><span class="dr-k">github</span><span class="dr-v"><a href="${escHtml(url)}" data-external>${escHtml(gh)}</a></span></div>`);
-    }
-    if (L.x) {
-      const handle = String(L.x).replace(/^@/, "");
-      rows.push(`<div class="alch-drawer-row"><span class="dr-k">x</span><span class="dr-v"><a href="https://x.com/${escHtml(handle)}" data-external>@${escHtml(handle)}</a></span></div>`);
-    }
-    for (const k of Object.keys(L)) {
-      if (k === "github" || k === "x") continue;
-      const v = L[k];
-      if (!v) continue;
-      const label = LINK_LABELS[k] || k;
-      const display = (typeof v === "string") ? v.replace(/^https?:\/\//, "") : String(v);
-      rows.push(`<div class="alch-drawer-row"><span class="dr-k">${escHtml(label)}</span><span class="dr-v"><a href="${escHtml(v)}" data-external>${escHtml(display)}</a></span></div>`);
-    }
-    if (rows.length === 0) rows.push(`<div class="alch-drawer-row"><span class="dr-k">links</span><span class="dr-v muted">— not yet submitted</span></div>`);
-    return rows.join("");
-  })();
-
-  const tagBits = [
-    `<span class="dt-id">${escHtml(team.record_id.toUpperCase())}</span>`,
-    `<span>·</span>`,
-    `<span>${escHtml(s ? s.name : domainLabel(team.domain))}</span>`,
-    `<span>·</span>`,
-    `<span>${escHtml(domainLabel(team.domain))}</span>`,
-  ];
-  if (team.is_mentor) {
-    tagBits.push(`<span>·</span>`, `<span>mentor</span>`);
-  }
-  if (state.mode === "constellation") {
-    const snap = activeConstellationSnapshot();
-    if (snap?.label) tagBits.push(`<span>·</span>`, `<span>${escHtml(snap.label)}</span>`);
-  }
-
-  // Editorial section header — italic-serif title + terse lowercase sub-label,
-  // matching the collab board's .alch-cb-sechead.
-  const sechead = (title, sub) =>
-    `<div class="alch-drawer-sechead"><h4>${escHtml(title)}</h4>${sub ? `<span class="dr-sub">${escHtml(sub)}</span>` : ""}</div>`;
-
-  // Roster — primary contributors (person.team) + anyone who lists this team in
-  // secondary_teams. Rendered as gold-accent person chips (people read
-  // differently from teams/clusters — the collab shape-grammar).
-  const roster = (state.cohort.people || []).filter(p =>
-    p.team === team.record_id || (Array.isArray(p.secondary_teams) && p.secondary_teams.includes(team.record_id)));
-  const crewChips = roster.map(p => {
-    const role = p.role || (p.team === team.record_id ? "" : "contributor");
-    return `<span class="alch-drawer-person"><span class="dp-name">${escHtml(p.name || p.record_id)}</span>${role ? `<span class="dp-role">${escHtml(role)}</span>` : ""}</span>`;
-  }).join("");
-  const successChips = constSuccessDimensions(team).map(d => `<span class="alch-drawer-success">${escHtml(d)}</span>`).join("");
-  const opRows = [
-    ["now", team.now],
-    ["this week", team.weekly_goals],
-    ["graduation", team.graduation_target],
-    ["milestones", team.monthly_milestones],
-  ].filter(([, v]) => constText(v)).map(([k, v]) =>
-    `<div class="alch-drawer-row"><span class="dr-k">${escHtml(k)}</span><span class="dr-v">${escHtml(constText(v))}</span></div>`
-  ).join("");
-
-  body.innerHTML = `
-    <div class="alch-drawer-tag">${tagBits.join("")}</div>
-    <div class="alch-drawer-name">${escHtml(team.name)}</div>
-    <div class="alch-drawer-shape">${s ? shapeSvgByFam(s.fam, hashStr(team.record_id)) : ""}</div>
-    <div class="alch-drawer-rule"></div>
-    <section class="alch-drawer-section">
-      ${sechead("about", "focus · size · geo")}
-      <div class="alch-drawer-row"><span class="dr-k">focus</span><span class="dr-v">${escHtml(team.focus || "—")}</span></div>
-      <div class="alch-drawer-row"><span class="dr-k">team</span><span class="dr-v">${m} ${m === 1 ? "person" : "people"}</span></div>
-      <div class="alch-drawer-row"><span class="dr-k">geo</span><span class="dr-v">${escHtml(team.geo || "—")}</span></div>
-      ${team.traction ? `<div class="alch-drawer-row"><span class="dr-k">traction</span><span class="dr-v">${escHtml(team.traction)}</span></div>` : ""}
-    </section>
-    ${crewChips ? `
-      <section class="alch-drawer-section">
-        ${sechead("crew", "who to talk to")}
-        <div class="alch-drawer-people">${crewChips}</div>
-      </section>
-    ` : ""}
-    ${successChips || opRows ? `
-      <section class="alch-drawer-section">
-        ${sechead("operating model", "success vector · current proof")}
-        ${successChips ? `<div class="alch-drawer-successes">${successChips}</div>` : ""}
-        ${opRows}
-      </section>
-    ` : ""}
-    <section class="alch-drawer-section">
-      ${sechead("pmf · journey", "where they are on the arc")}
-      ${journeyDetailSection(team)}
-    </section>
-    ${team.paper_basis || team.hackathon_note ? `
-      <section class="alch-drawer-section">
-        ${sechead("credentials", "papers · hackathons")}
-        ${team.paper_basis  ? `<div class="alch-drawer-row"><span class="dr-k">paper</span><span class="dr-v">${escHtml(constText(team.paper_basis))}</span></div>`  : ""}
-        ${team.hackathon_note ? `<div class="alch-drawer-row"><span class="dr-k">hackathon</span><span class="dr-v"><span style="color:var(--alchemy-oxide-bright)">★</span> ${escHtml(team.hackathon_note)}</span></div>` : ""}
-      </section>
-    ` : ""}
-    <section class="alch-drawer-section">
-      ${sechead("links", "")}
-      ${linksRow}
-    </section>
-    ${memberClusters.length ? `
-      <section class="alch-drawer-section">
-        ${sechead("clusters", "why they sit in these wells")}
-        <div class="alch-drawer-clusters alch-drawer-cluster-cards">
-          ${memberClusters.map(cl => `
-            <span class="alch-drawer-cluster"><span>${escHtml(cl.label || cl.name || cl.record_id)}</span>${cl.description ? `<em>${escHtml(cl.description)}</em>` : ""}</span>
-          `).join("")}
-        </div>
-      </section>
-    ` : ""}
-  `;
-  // Open external links via the Electron shell, not in-window.
-  for (const a of body.querySelectorAll("a[data-external]")) {
-    a.addEventListener("click", (e) => {
-      e.preventDefault();
-      const url = a.getAttribute("href");
-      if (url) try { window.api?.openExternal?.(url); } catch {}
-    });
-  }
-  drawer.querySelector(".alch-drawer-tag-host")?.replaceChildren();
-  // Open with a frame delay so the transition fires.
-  requestAnimationFrame(() => {
-    backdrop.classList.add("is-open");
-    drawer.classList.add("is-open");
-  });
-}
-
-function closeDrawer() {
-  state.constellationDrawerRecordId = null;
-  const backdrop = document.querySelector(".alch-drawer-backdrop");
-  const drawer = document.querySelector(".alch-drawer");
-  if (backdrop) backdrop.classList.remove("is-open");
-  if (drawer) drawer.classList.remove("is-open");
-}
-
-let _drawerNodes = null;
-function ensureDrawer() {
-  if (_drawerNodes) return _drawerNodes;
-  const backdrop = document.createElement("div");
-  backdrop.className = "alch-drawer-backdrop";
-  backdrop.addEventListener("click", closeDrawer);
-  document.body.appendChild(backdrop);
-
-  const drawer = document.createElement("aside");
-  drawer.className = "alch-drawer";
-  drawer.setAttribute("aria-label", "team detail");
-  drawer.innerHTML = `
-    <header class="alch-drawer-head">
-      <div class="alch-drawer-tag-host"></div>
-      <button class="alch-drawer-close" type="button" title="close (esc)">close</button>
-    </header>
-    <div class="alch-drawer-body"></div>
-  `;
-  drawer.querySelector(".alch-drawer-close").addEventListener("click", closeDrawer);
-  document.body.appendChild(drawer);
-
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && drawer.classList.contains("is-open")) closeDrawer();
-  });
-
-  _drawerNodes = { backdrop, drawer, body: drawer.querySelector(".alch-drawer-body") };
-  return _drawerNodes;
+  const items = compactCohortLinkItems({ links: L || {} });
+  if (!items.length) return `<div class="alch-detail-row"><span class="adr-k">links</span><span class="adr-v" style="opacity:0.55">— not yet submitted</span></div>`;
+  return `<div class="alch-detail-row"><span class="adr-k">links</span><span class="adr-v">${items.map(item =>
+    `<a href="${escAttr(item.href)}" data-external title="${escAttr(item.display)}">${escHtml(item.label)}</a>`
+  ).join('<span class="acm-sep">·</span>')}</span></div>`;
 }
 
 // ─── profile (localStorage; cohort-data write-back is Phase 4) ───────
@@ -13152,11 +13094,10 @@ function renderProfile() {
   const themeNow = getTheme();
   const themeNext = themeNow === "light" ? "dark" : "light";
   state.canvas.innerHTML = `
-    <!-- Theme toggle rides the intro strip's right edge (the strip is a
-         space-between flex row) — no dedicated header row pushing the
-         seal section down. -->
+    <!-- Theme toggle keeps the old intro strip's top-right slot (the row is
+         right-aligned) — no dedicated header row pushing the seal section
+         down. -->
     <div class="alch-page-intro">
-      <span>your seal — who you are on this device — and the cohort record editor. when swf-node is running, edits land locally and gossip to LAN peers; github PR is the fallback.</span>
       <button
         id="alch-theme-toggle"
         class="alch-theme-toggle"

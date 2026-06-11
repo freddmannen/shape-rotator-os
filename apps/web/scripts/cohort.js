@@ -7,6 +7,8 @@ import {
   renderProfileForm,
   shapeForTeam,
   domainLabel,
+  cohortRosterForTeam,
+  compactCohortLinkItems,
 } from "@shape-rotator/shape-ui";
 
 const TEAM_CHIPS = [
@@ -230,6 +232,20 @@ function renderProofRead(rec) {
   return renderProse(sentences.join("\n\n"));
 }
 
+// Flat section — same hairline + label language as the disclosure, but
+// the content is simply visible. The dossier reads top to bottom; only
+// the long tail (timeline) stays collapsible. Mirrors the Electron app.
+function renderFlatSection(title, body, extraClass = "") {
+  const cleaned = asArray(body).join("");
+  if (!cleaned.trim()) return "";
+  return `
+    <section class="cd-section cd-section-flat ${extraClass}">
+      <div class="cd-flat-label">${escHtml(title)}</div>
+      <div class="cd-section-body">${cleaned}</div>
+    </section>
+  `;
+}
+
 function renderSection(title, body, open = false, preview = "") {
   const cleaned = asArray(body).join("");
   if (!cleaned.trim()) return "";
@@ -247,8 +263,33 @@ function renderSection(title, body, open = false, preview = "") {
   `;
 }
 
+// Collapsed-section previews carry CONTENT, not schema: the summary line
+// replaces uncertainty with the actual signal. Empty in → empty out so
+// callers can fall back to a schema hint. Mirrors the Electron renderer.
+function previewSnippet(value, max = 64) {
+  const first = Array.isArray(value)
+    ? value.find(v => v != null && String(v).trim())
+    : value;
+  const s = String(first || "").replace(/\s+/g, " ").trim();
+  if (!s) return "";
+  return s.length > max ? `${s.slice(0, max - 1).trimEnd()}…` : s;
+}
+
 function timelinePreview(items = []) {
-  const labels = [...new Set(asArray(items)
+  const rows = asArray(items);
+  // Lead with the most recent entry — "what happened last" is the signal;
+  // a list of type labels restated schema.
+  const dated = rows
+    .filter(item => item && item.date)
+    .sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  const latest = dated[0] || rows[rows.length - 1];
+  if (latest) {
+    const title = previewSnippet(latest.title || labelize(latest.type || ""), 48);
+    if (title) {
+      return latest.date ? `${dateText(latest.date)} — ${title}` : title;
+    }
+  }
+  const labels = [...new Set(rows
     .map(item => labelize(item.type || item.source || ""))
     .filter(Boolean))]
     .slice(0, 3);
@@ -339,24 +380,6 @@ function cohortDetailHref(recordId) {
   return `#${encodeURIComponent(recordId || "")}`;
 }
 
-function prettyLinkLabel(key) {
-  const labels = {
-    github: "GitHub",
-    repo: "Repo",
-    repository: "Repo",
-    website: "Website",
-    site: "Website",
-    demo: "Demo",
-    docs: "Docs",
-    deck: "Deck",
-    linkedin: "LinkedIn",
-    x: "X",
-    twitter: "X",
-  };
-  const k = String(key || "").toLowerCase();
-  return labels[k] || labelize(k || "link").replace(/\b\w/g, c => c.toUpperCase());
-}
-
 function compactPills(items) {
   const rows = asArray(items)
     .map(item => String(item || "").trim())
@@ -403,20 +426,12 @@ function compactPills(items) {
   }
 
   function teamPeopleFor(teamId) {
-    return people.filter(p =>
-      p.team === teamId || asArray(p.secondary_teams).includes(teamId)
-    );
+    return cohortRosterForTeam(people, teamId);
   }
 
   function surfaceLinkAnchors(links = {}) {
-    return Object.entries(links || {})
-      .filter(([, value]) => !isBlank(value))
-      .map(([key, value]) => {
-        const href = normalizeLinkHref(key, value);
-        const label = prettyLinkLabel(key);
-        if (!href) return `<span>${escHtml(label)}</span>`;
-        return `<a href="${escAttr(href)}" target="_blank" rel="noopener noreferrer">${escHtml(label)}</a>`;
-      });
+    return compactCohortLinkItems({ links })
+      .map(item => `<a href="${escAttr(item.href)}" target="_blank" rel="noopener noreferrer" title="${escAttr(item.display)}">${escHtml(item.label)}</a>`);
   }
 
   function renderSurfaceRoutes(rec, isPerson, team, members) {
@@ -428,12 +443,11 @@ function compactPills(items) {
       });
     }
     if (!isPerson && members.length) {
-      const visible = members.slice(0, 2).map(member =>
+      // Full roster, always — a "+N" stub hid teammates behind a click and
+      // implied a single owner. The names ARE the team signal.
+      const visible = members.map(member =>
         `<a href="#${escAttr(encodeURIComponent(member.record_id))}">${escHtml(member.name || member.record_id)}</a>`
       );
-      if (members.length > visible.length) {
-        visible.push(`<a href="#${escAttr(encodeURIComponent(rec.record_id))}">+${members.length - visible.length}</a>`);
-      }
       rows.push({ label: teamKind(rec) === "project" ? "contributors" : "team", items: visible });
     }
     const links = surfaceLinkAnchors(rec.links || {});
@@ -460,7 +474,9 @@ function compactPills(items) {
     const members = isPerson ? [] : teamPeopleFor(rec.record_id);
     const title = rec.name || rec.record_id;
     const subtitle = isPerson
-      ? (rec.role || team?.name || labelize(rec.role_class || "individual"))
+      ? (team && rec.role
+        ? `${team.name || team.record_id} · ${rec.role}`
+        : (team?.name || rec.role || labelize(rec.role_class || "individual")))
       : (rec.focus || rec.record_id);
     const tags = isPerson
       ? [idLabel, labelize(rec.role_class || rec.role || "individual"), rec.domain ? domainLabel(rec.domain) : "", rec.geo].filter(Boolean)
@@ -583,7 +599,7 @@ function compactPills(items) {
           ${rec.role ? `<p class="cd-focus">${escHtml(rec.role)}</p>` : ""}
           <div class="cd-rail-list">
             <div><span>status</span>${escHtml(labelize(rec.role_class || "person"))}</div>
-            ${team ? `<div><span>team</span><a href="#${escAttr(encodeURIComponent(team.record_id))}">${escHtml(team.name || team.record_id)}</a></div>` : ""}
+            ${team ? `<div><span>team</span>${teamQuickLink(team)}</div>` : ""}
             ${rec.geo ? `<div><span>geo</span>${escHtml(rec.geo)}</div>` : ""}
             ${rec.domain ? `<div><span>domain</span>${escHtml(domainLabel(rec.domain))}</div>` : ""}
             ${dates ? `<div><span>window</span>${escHtml(dates)}</div>` : ""}
@@ -609,7 +625,7 @@ function compactPills(items) {
           <div class="cd-rail-list">
             ${rec.domain ? `<div><span>domain</span>${escHtml(domainLabel(rec.domain))}</div>` : ""}
             ${rec.geo ? `<div><span>geo</span>${escHtml(rec.geo)}</div>` : ""}
-            ${memberLinks ? `<div><span>${kind === "project" ? "contributors" : "members"}</span><span class="cd-rail-members">${memberLinks}</span></div>` : ""}
+            ${memberLinks ? `<div><span>${kind === "project" ? "contributors" : "team"}</span><span class="cd-rail-members">${memberLinks}</span></div>` : ""}
             ${rec.membership ? `<div><span>status</span>${escHtml(labelize(rec.membership))}</div>` : ""}
           </div>
         </div>
@@ -637,11 +653,9 @@ function compactPills(items) {
     const themes = renderQuickRow("themes",
       asArray(rec.recurring_themes).slice(0, 4).map(value => quickText("", value))
     );
-    const teamContext = team ? renderQuickRow("team context", [
-      teamQuickLink(team),
-      quickText("focus", team.focus),
-    ]) : "";
-    const bioSection = renderSection("about / bio", renderProse(rec.bio_md), true, "profile context");
+    // (No "team context" quick row — the rail's team token owns that fact;
+    // the team's focus lives one click away on its dossier.)
+    const bioSection = renderFlatSection("about / bio", renderProse(rec.bio_md));
     const currentRows = [
       renderRow("now", rec.now),
       renderRow("weekly intention", rec.weekly_intention),
@@ -667,20 +681,20 @@ function compactPills(items) {
           <span class="cd-h">individual read</span>
         </div>
         ${bioSection ? `<div class="cd-section-stack cd-priority-stack">${bioSection}</div>` : ""}
-        <div class="cd-quick">${explore}${askMeAbout}${themes}${teamContext}</div>
+        <div class="cd-quick">${explore}${askMeAbout}${themes}</div>
         <div class="cd-section-stack">
-          ${renderSection("current read", currentRows, !bioSection, "now, weekly intention")}
-          ${renderSection("working with", workingRows, false, "style, availability, seeks")}
-          ${renderSection("proof / prior work", proofRead, false, "shipping, lineage")}
+          ${renderFlatSection("current read", currentRows)}
+          ${renderFlatSection("working with", workingRows)}
+          ${renderFlatSection("proof / prior work", proofRead)}
+          ${renderFlatSection("routes / asks", routeRows)}
           ${renderSection(`timeline · ${timelineItems.length}`, renderTimelineItems(timelineItems), false, timelinePreview(timelineItems))}
-          ${renderSection("routes / asks", routeRows, false, "other teams, asks")}
         </div>
       </section>
     `;
   }
 
   function renderTeamDetail(rec, editUrl, fam, kind) {
-    const teamPeople = people.filter(p => p.team === rec.record_id);
+    const teamPeople = teamPeopleFor(rec.record_id);
     const memberClusters = (cohort.clusters || []).filter(cl =>
       Array.isArray(cl.teams) && cl.teams.includes(rec.record_id)
     );
@@ -690,12 +704,12 @@ function compactPills(items) {
     const nextMove = renderQuickRow("next move", [
       quickText("", rec.now || journey?.next),
     ]);
-    const needs = renderQuickRow("needs",
-      asArray(rec.seeking).slice(0, 2).map(value => quickText("", value))
-    );
-    const provides = renderQuickRow("provides",
-      asArray(rec.offering).slice(0, 2).map(value => quickText("", value))
-    );
+    // (needs / provides quick rows retired — the flat "coordination" block
+    // shows the full seeking/offering lists in the same frame.)
+    const coordinationRows = [
+      renderRow("seeking", rec.seeking),
+      renderRow("offering", rec.offering),
+    ];
     const guild = renderQuickRow("guild",
       memberClusters.map(cl => quickText("", cl.label))
     );
@@ -724,6 +738,8 @@ function compactPills(items) {
       renderRow("prior shipping", rec.prior_shipping),
       renderRow("hackathon note", rec.hackathon_note),
     ];
+    // "next milestone" lives in the always-visible trajectory quick row —
+    // the section adds the qualitative read instead of repeating it.
     const trajectoryRows = journey ? [
       renderRow("company type", journey.companyType),
       renderRow("confidence", journey.confidence),
@@ -731,7 +747,6 @@ function compactPills(items) {
       renderRow("problem", journey.problem),
       renderRow("solution", journey.solution),
       renderRow("evidence notes", journey.evidenceNotes),
-      renderRow("next milestone", journey.next),
     ] : [];
 
     return `
@@ -740,10 +755,11 @@ function compactPills(items) {
         <div class="cd-ledger-head">
           <span class="cd-h">${escHtml(kind)} read</span>
         </div>
-        <div class="cd-quick cd-team-quick">${nextMove}${needs}${provides}${guild}${trajectory}${routes}${explore}</div>
+        <div class="cd-quick cd-team-quick">${nextMove}${guild}${trajectory}${routes}${explore}</div>
         <div class="cd-section-stack">
-          ${renderSection("trajectory", trajectoryRows, false, "stage, proof, next test")}
-          ${renderSection("evidence", evidenceRows, false, "traction, paper, shipping")}
+          ${renderFlatSection("positioning", trajectoryRows)}
+          ${renderFlatSection("evidence", evidenceRows)}
+          ${renderFlatSection("coordination", coordinationRows)}
           ${renderSection(`timeline · ${timelineItems.length}`, renderTimelineItems(timelineItems), false, timelinePreview(timelineItems))}
         </div>
       </section>
@@ -761,8 +777,6 @@ function compactPills(items) {
         <a class="cd-back" href="#" aria-label="back to grid"><span aria-hidden="true">&lt;-</span> back</a>
         <div class="cd-tag">
           <span>${escHtml(String(rec.record_id || "").toUpperCase())}</span>
-          <span class="cd-sep">/</span>
-          <span class="cd-kind cd-kind-${escAttr(shapeKind)}">${escHtml(shapeKind)}</span>
         </div>
         <div class="cd-actions">
           <button class="cd-edit" type="button" data-edit-toggle>edit details</button>
@@ -842,6 +856,28 @@ function compactPills(items) {
 
   renderKindFilter();
 
-  window.addEventListener("hashchange", syncFromHash);
+  // Sigil continuity, grid → dossier: tag the opened record's card canvas
+  // and let a same-document view transition morph it into the rail hero
+  // (which carries the matching view-transition-name statically in CSS).
+  // Forward only — back to the grid stays instant. Progressive: browsers
+  // without startViewTransition (or with reduced motion) swap directly.
+  function syncFromHashTransitioned() {
+    const id = parseDetailHash();
+    const reduceMotion = typeof matchMedia === "function"
+      && matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (id && !reduceMotion && typeof document.startViewTransition === "function") {
+      try {
+        const cardCanvas = document.querySelector(
+          `.cohort-item-card[data-record-id="${CSS.escape(id)}"] canvas`
+        );
+        if (cardCanvas) cardCanvas.style.viewTransitionName = "sr-sigil";
+      } catch {}
+      document.startViewTransition(syncFromHash);
+      return;
+    }
+    syncFromHash();
+  }
+
+  window.addEventListener("hashchange", syncFromHashTransitioned);
   syncFromHash();
 })();
