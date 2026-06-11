@@ -62,6 +62,7 @@
   --alch-i: 0;
   position: relative;
   display: flex; flex-direction: column; gap: 12px;
+  height: 100%; /* grid rows stretch — equal card heights per row */
   padding: 16px;
   /* The June-5 "polish public cohort profile pages" recipe (a0114d97),
    * verbatim: translucent warm base over the charcoal page with a
@@ -133,6 +134,11 @@
   line-height: 1.5;
   color: var(--ed-ink-2);
   overflow-wrap: anywhere;
+  /* Uniform head heights: the focus line gets two lines, then clips. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
 }
 
 /* ─── shape stage (full-size base kept for the field-guide legend) ── */
@@ -183,10 +189,14 @@
   -webkit-line-clamp: 3;
   max-height: calc(3 * 1.5 * 10px + 18px);
   overflow: hidden;
-  background: color-mix(in srgb, #181210 95%, transparent);
-  border: 1px solid var(--ed-rule-3);
-  border-radius: 8px;
-  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.35);
+  /* Liquid glass: the blur carries legibility over the bright sigil, so
+   * the veil itself can stay lighter and read as glass, not a card. */
+  background: color-mix(in srgb, #181210 72%, transparent);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+  backdrop-filter: blur(14px) saturate(1.2);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 10px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 3px 14px rgba(0, 0, 0, 0.35);
   font-family: var(--ed-mono);
   font-size: 10px;
   line-height: 1.5;
@@ -233,6 +243,7 @@
 /* ─── skill / topic chips along the card foot ─────────────────────── */
 .alch-card-chips {
   display: flex; flex-wrap: wrap; gap: 6px;
+  margin-top: auto; /* feet align across the row when cards stretch */
 }
 .alch-card-chips span {
   max-width: 26ch;

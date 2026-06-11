@@ -19945,10 +19945,84 @@ html[data-theme="light"] .alch-asks-verb-pill.has-verb-color[aria-pressed="true"
 .alch-detail-flat { padding: 18px 0 10px; }
 .alch-detail-ledger .alch-quick-row { min-height: 42px; padding: 12px 0; }
 /* Directory grid — the original shows three generous columns, not a
- * five-up dense pack. */
+ * five-up dense pack. Rows stretch so card heights match per row. */
 .alch-specimens {
   grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
   gap: 22px;
+  align-items: stretch;
+}
+
+/* ══ Liquid glass chrome (2026-06) ═══════════════════════════════════
+ * Glass is reserved for CHROME — the floating controls bar, inspector,
+ * readouts, tooltips — surfaces that hover over scrolling content and
+ * have something to refract. Content panels (cards, dossier) stay
+ * material so the blur stays purposeful. */
+:root {
+  --lg-bg:        rgba(40, 35, 36, 0.60);
+  --lg-bg-strong: rgba(38, 33, 34, 0.72);
+  --lg-border:    rgba(241, 236, 231, 0.13);
+  --lg-specular:  inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  --lg-shadow:    0 8px 28px rgba(0, 0, 0, 0.26);
+  --lg-blur:      blur(16px) saturate(1.25);
+}
+:root[data-theme="light"] {
+  --lg-bg:        rgba(255, 255, 255, 0.52);
+  --lg-bg-strong: rgba(255, 255, 255, 0.74);
+  --lg-border:    rgba(27, 20, 17, 0.13);
+  --lg-specular:  inset 0 1px 0 rgba(255, 255, 255, 0.65);
+  --lg-shadow:    0 8px 28px rgba(31, 26, 22, 0.12);
+}
+/* The view controls float as a glass bar and stay pinned while the grid
+ * or stage scrolls underneath — the one place blur earns its keep on
+ * the directory. */
+.alch-view-controls {
+  position: sticky;
+  top: 2px;
+  z-index: 6;
+  padding: 9px 14px;
+  margin: 2px 0 16px;
+  border: 1px solid var(--lg-border);
+  border-bottom: 1px solid var(--lg-border);
+  border-radius: 12px;
+  background: var(--lg-bg);
+  -webkit-backdrop-filter: var(--lg-blur);
+  backdrop-filter: var(--lg-blur);
+  box-shadow: var(--lg-specular), var(--lg-shadow);
+}
+/* Inspector + generated/selected readouts share one glass panel family —
+ * consistent box language across map, journey, stack, and people. */
+.ac-inspector,
+.ac-main-readout {
+  border: 1px solid var(--lg-border);
+  border-radius: 12px;
+  background:
+    linear-gradient(112deg, rgba(180, 58, 25, 0.10), transparent 52%),
+    var(--lg-bg-strong);
+  -webkit-backdrop-filter: var(--lg-blur);
+  backdrop-filter: var(--lg-blur);
+  box-shadow: var(--lg-specular), var(--lg-shadow);
+}
+/* Floating tooltips are pure glass. */
+.alch-constellation-stage .ac-tip {
+  border: 1px solid var(--lg-border);
+  border-radius: 10px;
+  background: var(--lg-bg-strong);
+  -webkit-backdrop-filter: var(--lg-blur);
+  backdrop-filter: var(--lg-blur);
+  box-shadow: var(--lg-specular), var(--lg-shadow);
+}
+/* Every constellation stage sits in the same material panel as the
+ * dossier — one box language across all cohort views. */
+.alch-constellation-stage {
+  border: 1px solid rgba(241, 236, 231, 0.12);
+  border-radius: 8px;
+  background:
+    linear-gradient(112deg, rgba(180, 58, 25, 0.06), transparent 50%),
+    rgba(28, 25, 25, 0.45);
+}
+html[data-theme="light"] .alch-constellation-stage {
+  border-color: rgba(27, 20, 17, 0.12);
+  background: linear-gradient(180deg, #FFFFFF 0%, #F6F1E9 100%);
 }
 .alch-detail-rail {
   min-width: 0;
