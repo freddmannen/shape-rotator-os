@@ -1283,6 +1283,7 @@ function computeMembraneData() {
 // Public hook used by membrane/index.js.
 window.__srwkAlchemyJump = function alchemyJumpFromMembrane(mode, opts) {
   if (mode === "collab") {
+    clearDetailForNavigation();
     state.mode = "constellation";
     state.constellationMode = "collab";
     try {
@@ -1296,6 +1297,7 @@ window.__srwkAlchemyJump = function alchemyJumpFromMembrane(mode, opts) {
   // intel lives inside the context page now — jump to its view there.
   if (mode === "intel") { mode = "context"; opts = { ...(opts || {}), contextView: opts?.contextView || "signals" }; }
   if (!ALCHEMY_MODES.includes(mode)) return;
+  clearDetailForNavigation();
   state.mode = mode;
   if (mode === "context" && opts && opts.contextView) {
     state.contextVault.mode = contextNormalizeView(opts.contextView);
@@ -1331,16 +1333,7 @@ window.__srwkAlchemyJump = function alchemyJumpFromMembrane(mode, opts) {
 // their profile in the cohort surface (shapes mode with detail page).
 window.__srwkAlchemyShowRecord = function showRecordFromMembrane(recordId, returnMode = 'shapes') {
   if (!recordId) return;
-  if (!ALCHEMY_MODES.includes(returnMode)) returnMode = 'shapes';
-  state.mode = returnMode;
-  state.detailRecordId = String(recordId);
-  state.detailReturnMode = returnMode;
-  try {
-    localStorage.setItem(ALCHEMY_LS_KEY, returnMode);
-    localStorage.setItem(DETAIL_LS_KEY, JSON.stringify({ recordId: String(recordId), returnMode }));
-  } catch {}
-  syncRailSelection();
-  render();
+  openDetail(recordId, returnMode);
 };
 
 // Display id "SHAPE-NN" from the team's index in the array.
@@ -5852,13 +5845,30 @@ function wireShapeCardClicks() {
   wireExternalLinks(state.canvas);
 }
 
-function openDetail(recordId) {
+function normalizeDetailReturnMode(mode) {
+  if (mode === "collab") return "constellation";
+  if (mode === "pulse") return "shapes";
+  if (mode === "intel") return "context";
+  return ALCHEMY_MODES.includes(mode) ? mode : "shapes";
+}
+
+function clearDetailForNavigation() {
+  state.detailRecordId = null;
+  state.detailReturnMode = null;
+  try { localStorage.removeItem(DETAIL_LS_KEY); } catch {}
+}
+
+function openDetail(recordId, returnMode = state.mode || "shapes") {
   if (!recordId) return;
+  const mode = normalizeDetailReturnMode(returnMode);
+  state.mode = mode;
   state.detailRecordId = String(recordId);
-  // Remember where to land on back — usually shapes, but if user opened
-  // the detail from a different mode (future entry points) honor that.
-  state.detailReturnMode = state.mode || "shapes";
+  // Remember where to land on back. Constellation sub-views keep their
+  // own state in state.constellationMode, so restoring "constellation"
+  // returns to map/journey/stack/collab rather than the generic cohort grid.
+  state.detailReturnMode = mode;
   try {
+    localStorage.setItem(ALCHEMY_LS_KEY, mode);
     localStorage.setItem(DETAIL_LS_KEY, JSON.stringify({
       recordId: state.detailRecordId,
       returnMode: state.detailReturnMode,
@@ -6362,7 +6372,7 @@ function wireConstellationHover() {
         // page. (The legacy summary drawer is retired — the dossier now
         // carries everything it showed.)
         const rid = openTarget.getAttribute("data-const-open-record");
-        if (rid) openDetail(rid);
+        if (rid) openDetail(rid, "constellation");
         return;
       }
       const personTarget = e.target.closest("[data-const-person]");
@@ -9626,10 +9636,10 @@ function wireCollab() {
         // Same two-click grammar as the other cohort views: first click
         // selects into the collab inspector, the second click on the same
         // record commits to its full page. (Deselect via inspector/Escape.)
-        if (collabSameSelection(state.collabSelection, next)) openDetail(rid);
+        if (collabSameSelection(state.collabSelection, next)) openDetail(rid, "constellation");
         else setCollabSelection(next);
       } else {
-        openDetail(rid);
+        openDetail(rid, "constellation");
       }
     };
     el.addEventListener("click", activate);
