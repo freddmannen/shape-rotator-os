@@ -114,8 +114,8 @@
 .alch-card-sub {
   margin: 0;
   font-family: var(--font-sans, inherit);
-  font-size: 12.5px;
-  line-height: 1.45;
+  font-size: 13px;
+  line-height: 1.5;
   color: var(--ed-ink-2);
   overflow-wrap: anywhere;
 }
@@ -198,8 +198,9 @@
 /* ─── title block ─────────────────────────────────────────────────── */
 .alch-card-name {
   font-family: var(--ed-display);
-  font-size: 19px;
+  font-size: 20px;
   font-weight: 600;
+  font-style: normal;
   letter-spacing: -0.012em;
   color: var(--ed-ink-1);
   margin: 0;

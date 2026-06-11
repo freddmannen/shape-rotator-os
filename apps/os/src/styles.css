@@ -19887,14 +19887,47 @@ html[data-theme="light"] .alch-asks-verb-pill.has-verb-color[aria-pressed="true"
   box-shadow: 0 1px 0 rgba(241, 236, 231, 0.04) inset, 0 2px 12px rgba(0, 0, 0, 0.18);
   padding: 4px 28px;
 }
-/* Rail name — the original's compact lowercase semibold, not a display
- * headline; the sigil above it is the hero. */
+/* Rail name — the original's compact lowercase semibold, UPRIGHT (the
+ * cook generation's italic reads as a different design); the sigil above
+ * it is the hero. */
 .alch-detail-rail .alch-detail-name {
   font-size: 38px;
   font-weight: 600;
+  font-style: normal;
   letter-spacing: -0.015em;
   text-transform: lowercase;
   line-height: 1.08;
+}
+.alch-detail-rail .alch-detail-focus {
+  font-style: normal;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: rgba(var(--ink-rgb), 0.72);
+}
+.alch-detail-rail .alch-detail-shape { width: min(100%, 248px); }
+/* Reading sizes per the original: prose at a comfortable 13.5/1.7,
+ * generous air between blocks and quick rows. */
+.alch-detail-prose,
+.alch-detail-prose p {
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: rgba(var(--ink-rgb), 0.78);
+}
+.alch-detail-ledger .alch-section-stack { gap: 18px; }
+.alch-detail-flat { padding: 18px 0 10px; }
+.alch-detail-ledger .alch-quick-row { min-height: 48px; padding: 12px 0; }
+.alch-detail-quick:not(.alch-team-quick) .alch-quick-link,
+.alch-detail-quick:not(.alch-team-quick) .alch-quick-pill,
+.alch-detail-quick:not(.alch-team-quick) .alch-quick-text {
+  min-height: 27px;
+  padding: 4px 11px;
+  font-size: 11.5px;
+}
+/* Directory grid — the original shows three generous columns, not a
+ * five-up dense pack. */
+.alch-specimens {
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 22px;
 }
 .alch-detail-rail {
   min-width: 0;
