@@ -60,7 +60,6 @@ import * as Easel from "./easel.js";
 import * as Alchemy from "./alchemy.js";
 import * as Tabs from "./tabs.js";
 import * as Find from "./find.js";
-import { mountQuickDial } from "./quickdial.js";
 import { getManifest, getSyncLog, getNodeLog, getHealth } from "./sync-client.js";
 import { subscribeToCohortChanges, subscribeToSyncState } from "./cohort-source.js";
 
@@ -518,7 +517,9 @@ async function boot() {
   mountConnectionIndicator({ serverUrl: srwk.serverUrl });
   setConnectionState({ state: "connecting", serverUrl: srwk.serverUrl });
   mountSyncChip();
-  mountQuickDial();
+  // (The quick-dial radial menu lives on its side branch — see
+  // claude/nervous-newton-b2a9fd — and is intentionally absent from
+  // main and releases while it incubates.)
   wireGlobalKeyboard();
   registerVisualizerShortcutsAndCommands();
 
