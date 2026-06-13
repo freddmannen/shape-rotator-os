@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { ConvexGeometry } from 'three/examples/jsm/geometries/ConvexGeometry.js';
+import { ConvexGeometry } from '../../vendor/three-jsm/geometries/ConvexGeometry.js';
 
 // Domain identity — the four navigable surfaces. Survives the blob era:
 // the cube is one object that TINTS toward the active domain's colors
